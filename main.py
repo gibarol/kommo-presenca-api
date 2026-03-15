@@ -1,47 +1,252 @@
 import os
+import re
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
-from fastapi import FastAPI
-from typing import Any, List
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-BASE_URL = "https://presenca-bank-api.azurewebsites.net"
-LOGIN = os.getenv("PRESENCA_LOGIN")
-SENHA = os.getenv("PRESENCA_SENHA")
+# =========================
+# CONFIG
+# =========================
+BASE_URL = os.getenv("PRESENCA_BASE_URL", "https://presenca-bank-api.azurewebsites.net").rstrip("/")
+PRESENCA_LOGIN = os.getenv("PRESENCA_LOGIN", "")
+PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
+TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
 
-TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", 45))
+_LAST_CALL_TS = 0.0
 
 
-# -----------------------------
-# LOGIN
-# -----------------------------
-def presenca_login():
+# =========================
+# HELPERS
+# =========================
+def throttle() -> None:
+    global _LAST_CALL_TS
+    now = time.time()
+    wait = 2.0 - (now - _LAST_CALL_TS)
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_CALL_TS = time.time()
 
-    url = f"{BASE_URL}/login"
 
-    payload = {
-        "login": LOGIN,
-        "senha": SENHA
+def only_digits(value: Any) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def normalize_cpf(value: Any) -> str:
+    cpf = only_digits(value)
+    return cpf if len(cpf) == 11 else ""
+
+
+def normalize_phone(value: Any) -> str:
+    return only_digits(value)
+
+
+def split_phone(phone: str) -> Tuple[str, str]:
+    digits = only_digits(phone)
+    if len(digits) >= 11:
+        return digits[:2], digits[2:]
+    if len(digits) == 10:
+        return digits[:2], digits[2:]
+    return "11", "999999999"
+
+
+def normalize_cnpj_like(value: Any) -> str:
+    digits = only_digits(value)
+    if not digits:
+        return ""
+    if len(digits) >= 14:
+        return digits[-14:]
+    return digits.zfill(14)
+
+
+def safe_json(resp: requests.Response) -> Any:
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw_text": resp.text[:2000]}
+
+
+def auth_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
     }
 
-    r = requests.post(url, json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
 
-    token = r.json().get("token")
+def extract_candidates_vinculos(body: Any) -> List[dict]:
+    if isinstance(body, list):
+        return [x for x in body if isinstance(x, dict)]
+
+    if isinstance(body, dict):
+        for key in ["data", "result", "vinculos", "items", "content", "id"]:
+            val = body.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+        return [body]
+
+    return []
+
+
+def pick_vinculo(vinculos: List[dict]) -> Optional[dict]:
+    if not vinculos:
+        return None
+
+    elegiveis = []
+    for v in vinculos:
+        elegivel = v.get("elegivel")
+        if elegivel is True or str(elegivel).lower() in {"true", "sim", "1"}:
+            elegiveis.append(v)
+
+    return elegiveis[0] if elegiveis else vinculos[0]
+
+
+def extract_valor_parcela(margem_resp: dict) -> float:
+    for k in ["valorMargemDisponivel", "margemDisponivel", "valorParcela", "parcelaMaxima"]:
+        val = margem_resp.get(k)
+        if val is not None:
+            try:
+                return float(str(val).replace(",", "."))
+            except Exception:
+                pass
+    return 0.0
+
+
+def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, float]:
+    if isinstance(simul_resp, list) and simul_resp:
+        first = simul_resp[0]
+        if isinstance(first, dict):
+            valor = first.get("valorLiberado") or first.get("valor") or first.get("valorDisponivel") or 0
+            parcela = first.get("valorParcela") or first.get("parcela") or fallback_parcela or 0
+            try:
+                return float(str(valor).replace(",", ".")), float(str(parcela).replace(",", "."))
+            except Exception:
+                return 0.0, fallback_parcela
+
+    if isinstance(simul_resp, dict):
+        for key in ["data", "result", "items", "content"]:
+            val = simul_resp.get(key)
+            if isinstance(val, list) and val:
+                return extract_oferta(val, fallback_parcela)
+
+        valor = simul_resp.get("valorLiberado") or simul_resp.get("valor") or simul_resp.get("valorDisponivel") or 0
+        parcela = simul_resp.get("valorParcela") or simul_resp.get("parcela") or fallback_parcela or 0
+        try:
+            return float(str(valor).replace(",", ".")), float(str(parcela).replace(",", "."))
+        except Exception:
+            return 0.0, fallback_parcela
+
+    return 0.0, fallback_parcela
+
+
+def find_first_url(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict):
+        for _, v in obj.items():
+            found = find_first_url(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_first_url(item)
+            if found:
+                return found
+    elif isinstance(obj, str) and obj.startswith("http"):
+        return obj
+    return None
+
+
+def find_first_id(obj: Any) -> Optional[str]:
+    id_keys = {"id", "autorizacaoId", "authorizationId", "termoId"}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in id_keys and v:
+                return str(v)
+        for _, v in obj.items():
+            found = find_first_id(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_first_id(item)
+            if found:
+                return found
+    return None
+
+
+# =========================
+# PRESENÇA API
+# =========================
+def presenca_login_token() -> str:
+    if not PRESENCA_LOGIN or not PRESENCA_SENHA:
+        raise RuntimeError("PRESENCA_LOGIN_ou_SENHA_nao_configurada")
+
+    throttle()
+    url = f"{BASE_URL}/login"
+    payload = {
+        "login": PRESENCA_LOGIN,
+        "senha": PRESENCA_SENHA
+    }
+
+    print(f"[LOGIN] URL: {url}", flush=True)
+    resp = requests.post(url, json=payload, timeout=TIMEOUT)
+    print(f"[LOGIN] STATUS: {resp.status_code}", flush=True)
+
+    if not resp.ok:
+        raise RuntimeError(f"login_falhou_http_{resp.status_code}: {resp.text[:500]}")
+
+    data = safe_json(resp)
+    token = data.get("token")
+    if not token:
+        raise RuntimeError(f"token_ausente_no_login: {data}")
+
+    return token
+
+
+def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> Dict[str, Any]:
+    throttle()
+    url = f"{BASE_URL}/consultas/termo-inss"
+    payload = {
+        "cpf": cpf,
+        "nome": nome,
+        "telefone": normalize_phone(telefone),
+        "produtoId": 28
+    }
+
+    print(f"[TERMO] URL: {url}", flush=True)
+    print(f"[TERMO] PAYLOAD: {payload}", flush=True)
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    body = safe_json(resp)
+
+    print(f"[TERMO] STATUS: {resp.status_code}", flush=True)
+    print(f"[TERMO] BODY: {body}", flush=True)
+
+    termo_link = find_first_url(body)
+    autorizacao_id = None
+
+    if isinstance(body, dict):
+        autorizacao_id = body.get("autorizacaoId") or body.get("id")
+
+    if not autorizacao_id:
+        autorizacao_id = find_first_id(body)
 
     return {
-        "Authorization": f"Bearer {token}"
+        "http_status": resp.status_code,
+        "autorizacao_id": autorizacao_id,
+        "link_autorizacao": termo_link,
+        "detalhe_termo": body
     }
 
 
-# -----------------------------
-# AUTORIZAÇÃO DEVICE
-# -----------------------------
-def autorizar_device(headers, autorizacao_id):
-
+def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any]:
+    throttle()
     url = f"{BASE_URL}/consultas/termo-inss/{autorizacao_id}"
 
-    payload = {
+    # tenta primeiro exatamente com o body que você definiu
+    payload_user = {
         "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "operationalSystem": "macOS 10.15.7",
         "deviceModel": "MacBook Pro",
@@ -53,65 +258,96 @@ def autorizar_device(headers, autorizacao_id):
         }
     }
 
-    r = requests.put(url, json=payload, headers=headers, timeout=TIMEOUT)
+    headers_put = dict(headers)
+    headers_put["tenant-id"] = "superuser"
 
-    return r.json()
+    print(f"[ASSINAR TERMO] URL: {url}", flush=True)
+    print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
 
+    resp = requests.put(url, json=payload_user, headers=headers_put, timeout=TIMEOUT)
+    body = safe_json(resp)
 
-# -----------------------------
-# VÍNCULOS
-# -----------------------------
-def consultar_vinculos(headers, cpf):
+    print(f"[ASSINAR TERMO] STATUS USER: {resp.status_code}", flush=True)
+    print(f"[ASSINAR TERMO] BODY USER: {body}", flush=True)
 
-    url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-vinculos"
+    if resp.status_code in (200, 201, 204):
+        return {"ok": True, "detalhe": body}
 
-    payload = {
-        "cpf": cpf
+    # fallback para o formato da collection/documentação
+    payload_doc = {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "OperationalSystem": "macOS 10.15.7",
+        "DeviceModel": "MacBook Pro",
+        "DeviceName": "MacBook Pro 15\"",
+        "DeviceType": "desktop",
+        "GeoLocation": {
+            "Latitude": "-27.6450",
+            "Longitude": "-48.6678"
+        }
     }
 
-    r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
 
-    r.raise_for_status()
+    resp2 = requests.put(url, json=payload_doc, headers=headers_put, timeout=TIMEOUT)
+    body2 = safe_json(resp2)
 
-    return r.json()
+    print(f"[ASSINAR TERMO] STATUS DOC: {resp2.status_code}", flush=True)
+    print(f"[ASSINAR TERMO] BODY DOC: {body2}", flush=True)
+
+    return {
+        "ok": resp2.status_code in (200, 201, 204),
+        "detalhe": body2
+    }
 
 
-# -----------------------------
-# MARGEM
-# -----------------------------
-def consultar_margem(headers, cpf, matricula, cnpj):
-    import time
+def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
+    throttle()
+    url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-vinculos"
+    payload = {"cpf": cpf}
+
+    print(f"[VINCULOS] URL: {url}", flush=True)
+    print(f"[VINCULOS] PAYLOAD: {payload}", flush=True)
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    print(f"[VINCULOS] STATUS: {resp.status_code}", flush=True)
+    print(f"[VINCULOS] BODY: {safe_json(resp)}", flush=True)
+
+    return resp
+
+
+def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: str) -> Any:
+    throttle()
+    time.sleep(2)
 
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-margem"
-
     payload = {
         "cpf": cpf,
         "matricula": matricula,
         "cnpj": cnpj
     }
 
-    time.sleep(2)
+    print(f"[MARGEM] URL: {url}", flush=True)
+    print(f"[MARGEM] PAYLOAD: {payload}", flush=True)
 
-    r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    print(f"[MARGEM] STATUS: {resp.status_code}", flush=True)
+    print(f"[MARGEM] BODY: {safe_json(resp)}", flush=True)
 
-    if r.status_code == 429:
+    if resp.status_code == 429:
         return {
             "erro_rate_limit": True,
             "mensagem": "Limite de requisições atingido no endpoint de margem"
         }
 
-    r.raise_for_status()
-    return r.json()
+    resp.raise_for_status()
+    return resp.json()
 
 
-# -----------------------------
-# SIMULAÇÃO
-# -----------------------------
-def simular(headers, cpf, telefone, matricula, cnpj, margem):
+def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cnpj: str, margem: dict) -> Any:
+    throttle()
     url = f"{BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
-    ddd = telefone[:2] if len(telefone) >= 10 else "11"
-    numero = telefone[2:] if len(telefone) >= 10 else "999999999"
+    ddd, numero = split_phone(telefone)
 
     payload = {
         "tomador": {
@@ -155,131 +391,147 @@ def simular(headers, cpf, telefone, matricula, cnpj, margem):
         "documentos": []
     }
 
-    r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    print(f"[SIMULACAO] URL: {url}", flush=True)
+    print(f"[SIMULACAO] PAYLOAD: {payload}", flush=True)
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+    print(f"[SIMULACAO] STATUS: {resp.status_code}", flush=True)
+    print(f"[SIMULACAO] BODY: {safe_json(resp)}", flush=True)
+
+    resp.raise_for_status()
+    return resp.json()
 
 
-# -----------------------------
-# EXTRAIR VÍNCULO
-# -----------------------------
-def extract_vinculo(body: Any) -> List[dict]:
+# =========================
+# FLUXO FINAL
+# =========================
+def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None) -> Dict[str, Any]:
+    token = presenca_login_token()
+    headers = auth_headers(token)
 
-    if isinstance(body, list):
-        return body
-
-    if isinstance(body, dict):
-
-        for key in ["id", "data", "result", "items", "vinculos"]:
-            val = body.get(key)
-
-            if isinstance(val, list):
-                return val
-
-        return [body]
-
-    return []
-
-
-# -----------------------------
-# CONSULTA PRINCIPAL
-# -----------------------------
-@app.get("/consulta")
-def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: str = None):
-
-    headers = presenca_login()
-
-    # -------------------------
-    # SE JÁ TEM AUTORIZAÇÃO
-    # -------------------------
+    # se veio autorizacao_id na segunda chamada, tenta assinar primeiro
     if autorizacao_id:
+        assinatura = assinar_termo(headers, autorizacao_id)
+        if not assinatura.get("ok"):
+            return {
+                "status": "erro",
+                "mensagem": "Falha ao assinar termo com autorizacao_id",
+                "autorizacao_id": autorizacao_id,
+                "detalhe": assinatura.get("detalhe")
+            }
 
-        autorizar_device(headers, autorizacao_id)
+    # tenta consultar vínculos
+    resp_vinc = consultar_vinculos(headers, cpf)
 
-    # -------------------------
-    # CONSULTA VÍNCULOS
-    # -------------------------
-    try:
-
-        vinculos = consultar_vinculos(headers, cpf)
-
-    except Exception as e:
-
+    # se vínculos falhar e ainda não houver autorizacao_id, gera termo
+    if resp_vinc.status_code != 200 and not autorizacao_id:
+        termo = gerar_termo(headers, cpf, nome, telefone)
         return {
-            "status": "erro",
-            "mensagem": str(e)
+            "status": "aguardando_autorizacao",
+            "autorizacao_id": termo.get("autorizacao_id"),
+            "link_autorizacao": termo.get("link_autorizacao"),
+            "detalhe_termo": termo.get("detalhe_termo")
         }
 
-    lista = extract_vinculo(vinculos)
-
-    if not lista:
-
+    # se falhou mesmo com autorizacao_id, devolve erro
+    if resp_vinc.status_code != 200 and autorizacao_id:
         return {
             "status": "erro",
-            "mensagem": "Nenhum vínculo encontrado"
+            "mensagem": "Falha ao consultar vínculos mesmo após tentativa de autorização",
+            "autorizacao_id": autorizacao_id,
+            "detalhe_vinculos": safe_json(resp_vinc)
         }
 
-    v = lista[0]
+    vinculos_body = safe_json(resp_vinc)
+    vinculos = extract_candidates_vinculos(vinculos_body)
+    vinculo = pick_vinculo(vinculos)
 
-    matricula = v.get("matricula")
-    cnpj = v.get("numeroInscricaoEmpregador")
+    if not vinculo:
+        return {
+            "status": "erro",
+            "mensagem": "Nenhum vínculo encontrado",
+            "detalhe_vinculos": vinculos_body
+        }
+
+    matricula = str(
+        vinculo.get("matricula")
+        or vinculo.get("registroEmpregaticio")
+        or vinculo.get("registro")
+        or vinculo.get("matriculaRegistro")
+        or ""
+    )
+
+    cnpj = normalize_cnpj_like(
+        vinculo.get("numeroInscricaoEmpregador")
+        or vinculo.get("cnpjEmpregador")
+        or vinculo.get("cnpj")
+        or ""
+    )
 
     if not matricula or not cnpj:
-
         return {
             "status": "erro",
             "mensagem": "Não foi possível extrair matrícula/cnpj do vínculo",
-            "detalhe_vinculo": v
+            "detalhe_vinculo": vinculo
         }
 
-    # -------------------------
-    # MARGEM
-    # -------------------------
     margem = consultar_margem(headers, cpf, matricula, cnpj)
-
-    detalhe_margem = margem
-
-    valor_disponivel = detalhe_margem.get("valorMargemDisponivel")
-
-    # -------------------------
-    # SIMULAÇÃO
-    # -------------------------
-    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
-
-    lista_simulacao = simulacao if isinstance(simulacao, list) else []
-
-    if not lista_simulacao:
-
+    if isinstance(margem, dict) and margem.get("erro_rate_limit"):
         return {
             "status": "erro",
-            "mensagem": "Simulação vazia"
+            "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
+            "detalhe": margem
         }
 
-    melhor = lista_simulacao[0]
+    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
 
-    valor_liberado = melhor.get("valorLiberado")
-    parcela = melhor.get("valorParcela")
+    valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
 
     return {
         "status": "sucesso",
-        "cpf": cpf,
+        "elegibilidade": "sim",
+        "valor_disponivel": valor_disponivel,
+        "parcela": parcela,
         "matricula": matricula,
         "cnpj": cnpj,
-        "elegibilidade": "sim",
-        "valor_disponivel": valor_liberado,
-        "parcela": parcela,
-        "detalhe_margem": detalhe_margem,
-        "detalhe_simulacao": lista_simulacao,
-        "detalhe_vinculo": v
+        "detalhe_vinculo": vinculo,
+        "detalhe_margem": margem,
+        "detalhe_simulacao": simulacao
     }
 
 
-# -----------------------------
-# HEALTH CHECK
-# -----------------------------
+# =========================
+# ROTAS
+# =========================
 @app.get("/")
-def health():
+def home():
+    return {"status": "api rodando"}
 
-    return {
-        "status": "api rodando"
-    }
+
+@app.get("/consulta")
+def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None):
+    try:
+        cpf = normalize_cpf(cpf)
+        telefone = normalize_phone(telefone)
+
+        if not cpf:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "erro", "mensagem": "CPF inválido"}
+            )
+
+        resultado = tentar_fluxo_completo(
+            cpf=cpf,
+            nome=nome,
+            telefone=telefone,
+            autorizacao_id=autorizacao_id
+        )
+
+        return JSONResponse(status_code=200, content=resultado)
+
+    except Exception as e:
+        print("[ERRO GERAL]", str(e), flush=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "erro", "mensagem": str(e)}
+        )
