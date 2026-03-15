@@ -245,7 +245,9 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
     throttle()
     url = f"{BASE_URL}/consultas/termo-inss/{autorizacao_id}"
 
-    # tenta primeiro exatamente com o body que você definiu
+    headers_put = dict(headers)
+    headers_put["tenant-id"] = "superuser"
+
     payload_user = {
         "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "operationalSystem": "macOS 10.15.7",
@@ -258,22 +260,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         }
     }
 
-    headers_put = dict(headers)
-    headers_put["tenant-id"] = "superuser"
-
-    print(f"[ASSINAR TERMO] URL: {url}", flush=True)
-    print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
-
-    resp = requests.put(url, json=payload_user, headers=headers_put, timeout=TIMEOUT)
-    body = safe_json(resp)
-
-    print(f"[ASSINAR TERMO] STATUS USER: {resp.status_code}", flush=True)
-    print(f"[ASSINAR TERMO] BODY USER: {body}", flush=True)
-
-    if resp.status_code in (200, 201, 204):
-        return {"ok": True, "detalhe": body}
-
-    # fallback para o formato da collection/documentação
     payload_doc = {
         "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "OperationalSystem": "macOS 10.15.7",
@@ -286,19 +272,54 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         }
     }
 
-    print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
+    print(f"[ASSINAR TERMO] URL: {url}", flush=True)
 
-    resp2 = requests.put(url, json=payload_doc, headers=headers_put, timeout=TIMEOUT)
-    body2 = safe_json(resp2)
+    # tentativa 1: body no formato que você definiu
+    try:
+        print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
+        resp = requests.put(url, json=payload_user, headers=headers_put, timeout=(10, 20))
+        body = safe_json(resp)
 
-    print(f"[ASSINAR TERMO] STATUS DOC: {resp2.status_code}", flush=True)
-    print(f"[ASSINAR TERMO] BODY DOC: {body2}", flush=True)
+        print(f"[ASSINAR TERMO] STATUS USER: {resp.status_code}", flush=True)
+        print(f"[ASSINAR TERMO] BODY USER: {body}", flush=True)
 
-    return {
-        "ok": resp2.status_code in (200, 201, 204),
-        "detalhe": body2
-    }
+        if resp.status_code in (200, 201, 202, 204):
+            return {"ok": True, "detalhe": body, "modo": "user_payload"}
 
+        # se respondeu algo inválido, tenta fallback documental
+    except requests.exceptions.ReadTimeout as e:
+        print(f"[ASSINAR TERMO] TIMEOUT USER: {str(e)}", flush=True)
+        return {
+            "ok": True,
+            "detalhe": {"warning": "timeout_no_put_user_payload"},
+            "modo": "user_payload_timeout"
+        }
+    except Exception as e:
+        print(f"[ASSINAR TERMO] ERRO USER: {str(e)}", flush=True)
+
+    # tentativa 2: body no formato da collection/documentação
+    try:
+        print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
+        resp2 = requests.put(url, json=payload_doc, headers=headers_put, timeout=(10, 20))
+        body2 = safe_json(resp2)
+
+        print(f"[ASSINAR TERMO] STATUS DOC: {resp2.status_code}", flush=True)
+        print(f"[ASSINAR TERMO] BODY DOC: {body2}", flush=True)
+
+        if resp2.status_code in (200, 201, 202, 204):
+            return {"ok": True, "detalhe": body2, "modo": "doc_payload"}
+
+        return {"ok": False, "detalhe": body2, "modo": "doc_payload"}
+    except requests.exceptions.ReadTimeout as e:
+        print(f"[ASSINAR TERMO] TIMEOUT DOC: {str(e)}", flush=True)
+        return {
+            "ok": True,
+            "detalhe": {"warning": "timeout_no_put_doc_payload"},
+            "modo": "doc_payload_timeout"
+        }
+    except Exception as e:
+        print(f"[ASSINAR TERMO] ERRO DOC: {str(e)}", flush=True)
+        return {"ok": False, "detalhe": {"erro": str(e)}, "modo": "doc_payload_exception"}
 
 def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     throttle()
