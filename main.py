@@ -107,20 +107,56 @@ def consultar_margem(headers, cpf, matricula, cnpj):
 # -----------------------------
 # SIMULAÇÃO
 # -----------------------------
-def simular(headers, cpf, matricula, cnpj):
+def simular(headers, cpf, telefone, matricula, cnpj, margem):
+    url = f"{BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
-    url = f"{BASE_URL}/v3/operacoes/consignado-privado/simulacoes"
+    ddd = telefone[:2] if len(telefone) >= 10 else "11"
+    numero = telefone[2:] if len(telefone) >= 10 else "999999999"
 
     payload = {
-        "cpf": cpf,
-        "matricula": matricula,
-        "cnpj": cnpj
+        "tomador": {
+            "telefone": {
+                "ddd": ddd,
+                "numero": numero
+            },
+            "cpf": cpf,
+            "nome": margem.get("nome") or "CLIENTE",
+            "dataNascimento": margem.get("dataNascimento") or "1982-10-05",
+            "nomeMae": margem.get("nomeMae") or "NAO INFORMADO",
+            "email": "email@teste.com",
+            "sexo": margem.get("sexo") or "M",
+            "vinculoEmpregaticio": {
+                "cnpjEmpregador": cnpj,
+                "registroEmpregaticio": matricula
+            },
+            "dadosBancarios": {
+                "codigoBanco": None,
+                "agencia": None,
+                "conta": None,
+                "digitoConta": None,
+                "formaCredito": None
+            },
+            "endereco": {
+                "cep": "",
+                "rua": "",
+                "numero": "",
+                "complemento": "",
+                "cidade": "",
+                "estado": "",
+                "bairro": ""
+            }
+        },
+        "proposta": {
+            "valorSolicitado": 0,
+            "quantidadeParcelas": 0,
+            "produtoId": 28,
+            "valorParcela": margem.get("valorMargemDisponivel", 0)
+        },
+        "documentos": []
     }
 
     r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-
     r.raise_for_status()
-
     return r.json()
 
 
@@ -208,7 +244,7 @@ def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: str = None):
     # -------------------------
     # SIMULAÇÃO
     # -------------------------
-    simulacao = simular(headers, cpf, matricula, cnpj)
+    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
 
     lista_simulacao = simulacao if isinstance(simulacao, list) else []
 
