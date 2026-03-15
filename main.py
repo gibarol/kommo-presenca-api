@@ -491,31 +491,16 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    # Se veio autorizacao_id na segunda chamada,
-    # tenta assinar automaticamente e roda o fluxo novamente.
-    if autorizacao_id:
-        assinatura = assinar_termo(headers, autorizacao_id)
-        print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
+    def tentar_fluxo_autorizado_local() -> Dict[str, Any]:
+        resp_vinc = consultar_vinculos(headers, cpf)
 
-        if not assinatura.get("ok"):
+        if resp_vinc.status_code != 200:
             return {
                 "status": "erro",
-                "mensagem": "Falha ao assinar termo com autorizacao_id",
-                "autorizacao_id": autorizacao_id,
-                "detalhe": assinatura.get("detalhe"),
-                "modo_assinatura": assinatura.get("modo")
+                "mensagem": f"Falha ao consultar vínculos: HTTP {resp_vinc.status_code}",
+                "detalhe_vinculos": safe_json(resp_vinc)
             }
 
-        # dá um pequeno tempo para o banco efetivar internamente
-        time.sleep(5)
-
-        return executar_fluxo_autorizado(headers, cpf, telefone)
-
-    # 1ª tentativa: tentar direto
-    resp_vinc = consultar_vinculos(headers, cpf)
-
-    # Se já está autorizado, segue normal
-    if resp_vinc.status_code == 200:
         vinculos_body = safe_json(resp_vinc)
         vinculos = extract_candidates_vinculos(vinculos_body)
         vinculo = pick_vinculo(vinculos)
@@ -567,7 +552,36 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "parcela": parcela
         }
 
-    # Se não está autorizado, gera termo e tenta autorizar sozinho
+    # 1) Se já veio autorizacao_id, tenta assinar e reprocessar
+    if autorizacao_id:
+        assinatura = assinar_termo(headers, autorizacao_id)
+        print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
+
+        if not assinatura.get("ok"):
+            return {
+                "status": "erro",
+                "mensagem": "Falha ao assinar termo com autorizacao_id",
+                "autorizacao_id": autorizacao_id,
+                "detalhe": assinatura.get("detalhe"),
+                "modo_assinatura": assinatura.get("modo")
+            }
+
+        # espera e tenta novamente
+        time.sleep(5)
+        resultado = tentar_fluxo_autorizado_local()
+        if resultado.get("status") == "sucesso":
+            return resultado
+
+        # retry extra
+        time.sleep(5)
+        return tentar_fluxo_autorizado_local()
+
+    # 2) Primeira tentativa: pode já estar autorizado
+    resp_vinc = consultar_vinculos(headers, cpf)
+    if resp_vinc.status_code == 200:
+        return tentar_fluxo_autorizado_local()
+
+    # 3) Se não está autorizado, gera termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -579,60 +593,29 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_termo": termo.get("detalhe_termo")
         }
 
+    # 4) ASSINA AUTOMATICAMENTE COM O BODY FIXO
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
 
     if assinatura_auto.get("ok"):
+        # primeira tentativa após autoassinatura
         time.sleep(5)
+        resultado = tentar_fluxo_autorizado_local()
+        if resultado.get("status") == "sucesso":
+            return resultado
 
-        resp_vinc_2 = consultar_vinculos(headers, cpf)
-        if resp_vinc_2.status_code == 200:
-            vinculos_body = safe_json(resp_vinc_2)
-            vinculos = extract_candidates_vinculos(vinculos_body)
-            vinculo = pick_vinculo(vinculos)
+        # segunda tentativa após mais alguns segundos
+        time.sleep(5)
+        resultado = tentar_fluxo_autorizado_local()
+        if resultado.get("status") == "sucesso":
+            return resultado
 
-            if vinculo:
-                matricula = str(
-                    vinculo.get("matricula")
-                    or vinculo.get("registroEmpregaticio")
-                    or vinculo.get("registro")
-                    or vinculo.get("matriculaRegistro")
-                    or ""
-                )
-
-                cnpj = normalize_cnpj_like(
-                    vinculo.get("numeroInscricaoEmpregador")
-                    or vinculo.get("cnpjEmpregador")
-                    or vinculo.get("cnpj")
-                    or ""
-                )
-
-                if matricula and cnpj:
-                    margem = consultar_margem(headers, cpf, matricula, cnpj)
-                    if isinstance(margem, dict) and margem.get("erro_rate_limit"):
-                        return {
-                            "status": "erro",
-                            "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
-                            "detalhe": margem
-                        }
-
-                    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
-                    valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
-
-                    return {
-                        "status": "sucesso",
-                        "elegibilidade": "sim",
-                        "valor_disponivel": valor_disponivel,
-                        "parcela": parcela
-                    }
-
-    # Se não deu para concluir automaticamente, devolve pendência limpa
+    # 5) Só se realmente não deu certo, devolve aguardando_autorizacao
     return {
         "status": "aguardando_autorizacao",
         "autorizacao_id": novo_id,
         "link_autorizacao": link
     }
-
 
 # =========================
 # ROTAS
