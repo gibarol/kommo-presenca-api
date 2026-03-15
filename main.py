@@ -76,14 +76,16 @@ def auth_headers(token: str) -> Dict[str, str]:
 def extract_candidates_vinculos(body: Any) -> List[dict]:
     if isinstance(body, list):
         return [x for x in body if isinstance(x, dict)]
+
     if isinstance(body, dict):
-        for key in ["data", "result", "vinculos", "items", "content"]:
+        for key in ["data", "result", "vinculos", "items", "content", "id"]:
             val = body.get(key)
             if isinstance(val, list):
                 return [x for x in val if isinstance(x, dict)]
-        return [body]
-    return []
 
+        return [body]
+
+    return []
 
 def pick_vinculo(vinculos: List[dict]) -> Optional[dict]:
     if not vinculos:
