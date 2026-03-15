@@ -80,6 +80,7 @@ def consultar_vinculos(headers, cpf):
 # MARGEM
 # -----------------------------
 def consultar_margem(headers, cpf, matricula, cnpj):
+    import time
 
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-margem"
 
@@ -89,10 +90,17 @@ def consultar_margem(headers, cpf, matricula, cnpj):
         "cnpj": cnpj
     }
 
+    time.sleep(2)
+
     r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
 
-    r.raise_for_status()
+    if r.status_code == 429:
+        return {
+            "erro_rate_limit": True,
+            "mensagem": "Limite de requisições atingido no endpoint de margem"
+        }
 
+    r.raise_for_status()
     return r.json()
 
 
