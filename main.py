@@ -109,7 +109,7 @@ def consultar_margem(headers, cpf, matricula, cnpj):
 # -----------------------------
 def simular(headers, cpf, matricula, cnpj):
 
-    url = f"{BASE_URL}/v3/operacoes/consignado-privado/simular"
+    url = f"{BASE_URL}/v3/operacoes/consignado-privado/simulacoes"
 
     payload = {
         "cpf": cpf,
