@@ -378,18 +378,25 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
     print(f"[MARGEM] URL: {url}", flush=True)
     print(f"[MARGEM] PAYLOAD: {payload}", flush=True)
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
-    print(f"[MARGEM] STATUS: {resp.status_code}", flush=True)
-    print(f"[MARGEM] BODY: {safe_json(resp)}", flush=True)
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
+        print(f"[MARGEM] STATUS: {resp.status_code}", flush=True)
+        print(f"[MARGEM] BODY: {safe_json(resp)}", flush=True)
 
-    if resp.status_code == 429:
+        if resp.status_code == 429:
+            return {
+                "erro_rate_limit": True,
+                "mensagem": "Limite de requisições atingido no endpoint de margem"
+            }
+
+        resp.raise_for_status()
+        return resp.json()
+
+    except requests.exceptions.ReadTimeout:
         return {
-            "erro_rate_limit": True,
-            "mensagem": "Limite de requisições atingido no endpoint de margem"
+            "erro_timeout": True,
+            "mensagem": "Timeout ao consultar margem"
         }
-
-    resp.raise_for_status()
-    return resp.json()
 
 
 def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cnpj: str, margem: dict) -> Any:
@@ -497,12 +504,20 @@ def executar_fluxo_autorizado(headers: Dict[str, str], cpf: str, telefone: str) 
         }
 
     margem = consultar_margem(headers, cpf, matricula, cnpj)
-    if isinstance(margem, dict) and margem.get("erro_rate_limit"):
-        return {
-            "status": "erro",
-            "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
-            "detalhe": margem
-        }
+
+if isinstance(margem, dict) and margem.get("erro_rate_limit"):
+    return {
+        "status": "erro",
+        "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
+        "detalhe": margem
+    }
+
+if isinstance(margem, dict) and margem.get("erro_timeout"):
+    return {
+        "status": "erro",
+        "mensagem": "A consulta de margem demorou demais no Presença. Tente novamente em instantes.",
+        "detalhe": margem
+    }
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
     valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
