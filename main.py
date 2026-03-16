@@ -459,78 +459,6 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
 
 
 # =========================
-# FLUXO AUTORIZADO
-# =========================
-def executar_fluxo_autorizado(headers: Dict[str, str], cpf: str, telefone: str) -> Dict[str, Any]:
-    resp_vinc = consultar_vinculos(headers, cpf)
-    if resp_vinc.status_code != 200:
-        return {
-            "status": "erro",
-            "mensagem": f"Falha ao consultar vínculos: HTTP {resp_vinc.status_code}",
-            "detalhe_vinculos": safe_json(resp_vinc)
-        }
-
-    vinculos_body = safe_json(resp_vinc)
-    vinculos = extract_candidates_vinculos(vinculos_body)
-    vinculo = pick_vinculo(vinculos)
-
-    if not vinculo:
-        return {
-            "status": "erro",
-            "mensagem": "Nenhum vínculo encontrado",
-            "detalhe_vinculos": vinculos_body
-        }
-
-    matricula = str(
-        vinculo.get("matricula")
-        or vinculo.get("registroEmpregaticio")
-        or vinculo.get("registro")
-        or vinculo.get("matriculaRegistro")
-        or ""
-    )
-
-    cnpj = normalize_cnpj_like(
-        vinculo.get("numeroInscricaoEmpregador")
-        or vinculo.get("cnpjEmpregador")
-        or vinculo.get("cnpj")
-        or ""
-    )
-
-    if not matricula or not cnpj:
-        return {
-            "status": "erro",
-            "mensagem": "Não foi possível extrair matrícula/cnpj do vínculo",
-            "detalhe_vinculo": vinculo
-        }
-
-    margem = consultar_margem(headers, cpf, matricula, cnpj)
-
-if isinstance(margem, dict) and margem.get("erro_rate_limit"):
-    return {
-        "status": "erro",
-        "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
-        "detalhe": margem
-    }
-
-if isinstance(margem, dict) and margem.get("erro_timeout"):
-    return {
-        "status": "erro",
-        "mensagem": "A consulta de margem demorou demais no Presença. Tente novamente em instantes.",
-        "detalhe": margem
-    }
-
-    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
-    valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
-
-    return {
-        "status": "sucesso",
-        "elegibilidade": "sim",
-        "valor_disponivel": valor_disponivel,
-        "parcela": parcela
-    }
-
-
-# =========================
 # FLUXO COMPLETO
 # =========================
 def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None) -> Dict[str, Any]:
@@ -571,10 +499,18 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             }
 
         margem = consultar_margem(headers, cpf, matricula, cnpj)
+
         if isinstance(margem, dict) and margem.get("erro_rate_limit"):
             return {
                 "status": "erro",
                 "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
+                "detalhe": margem
+            }
+
+        if isinstance(margem, dict) and margem.get("erro_timeout"):
+            return {
+                "status": "erro",
+                "mensagem": "A consulta de margem demorou demais no Presença. Tente novamente em instantes.",
                 "detalhe": margem
             }
 
@@ -588,7 +524,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "parcela": parcela
         }
 
-    # 1) se já veio autorizacao_id
+    # 1) Se já veio autorizacao_id
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
@@ -617,14 +553,12 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "link_autorizacao": None
         }
 
-    # 2) primeira tentativa direta
+    # 2) Primeira tentativa direta
     resp_vinc = consultar_vinculos(headers, cpf)
 
-    # se já está autorizado, usa ESSA resposta e não consulta de novo
     if resp_vinc.status_code == 200:
         return processar_fluxo_com_vinculos_body(safe_json(resp_vinc))
 
-    # se bateu rate limit já na primeira consulta
     if resp_vinc.status_code == 429:
         return {
             "status": "erro",
@@ -632,7 +566,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_vinculos": safe_json(resp_vinc)
         }
 
-    # 3) não autorizado -> gera termo
+    # 3) Não autorizado -> gera termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -644,7 +578,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_termo": termo.get("detalhe_termo")
         }
 
-    # 4) autoassina imediatamente
+    # 4) Autoassina imediatamente
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
 
@@ -666,12 +600,14 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
 
-    # 5) só devolve pendência se não conseguiu mesmo
+    # 5) Só devolve pendência se realmente não conseguiu
     return {
         "status": "aguardando_autorizacao",
         "autorizacao_id": novo_id,
         "link_autorizacao": link
     }
+
+
 # =========================
 # ROTAS
 # =========================
