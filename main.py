@@ -17,7 +17,6 @@ PRESENCA_LOGIN = os.getenv("PRESENCA_LOGIN", "")
 PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
 
-# throttle recomendado pela doc
 _LAST_CALL_TS = 0.0
 
 
@@ -275,7 +274,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
 
     print(f"[ASSINAR TERMO] URL: {url}", flush=True)
 
-    # tentativa 1: body no formato definido por você
     try:
         print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
         resp = requests.put(url, json=payload_user, headers=headers_put, timeout=(10, 20))
@@ -296,7 +294,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
     except Exception as e:
         print(f"[ASSINAR TERMO] ERRO USER: {str(e)}", flush=True)
 
-    # tentativa 2: fallback conforme collection
     try:
         print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
         resp2 = requests.put(url, json=payload_doc, headers=headers_put, timeout=(10, 20))
@@ -334,6 +331,37 @@ def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     print(f"[VINCULOS] BODY: {safe_json(resp)}", flush=True)
 
     return resp
+
+
+def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int = 3, espera: int = 5) -> requests.Response:
+    ultimo_response = None
+    ultimo_erro = None
+
+    for i in range(tentativas):
+        try:
+            resp = consultar_vinculos(headers, cpf)
+
+            if resp.status_code == 200:
+                return resp
+
+            ultimo_response = resp
+        except requests.exceptions.ReadTimeout as e:
+            print(f"[VINCULOS RETRY] timeout tentativa {i+1}: {str(e)}", flush=True)
+            ultimo_erro = e
+        except Exception as e:
+            print(f"[VINCULOS RETRY] erro tentativa {i+1}: {str(e)}", flush=True)
+            ultimo_erro = e
+
+        if i < tentativas - 1:
+            time.sleep(espera)
+
+    if ultimo_response is not None:
+        return ultimo_response
+
+    if ultimo_erro is not None:
+        raise ultimo_erro
+
+    raise RuntimeError("Falha desconhecida ao consultar vínculos")
 
 
 def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: str) -> Any:
@@ -424,7 +452,7 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
 
 
 # =========================
-# FLUXO INTERNO
+# FLUXO AUTORIZADO
 # =========================
 def executar_fluxo_autorizado(headers: Dict[str, str], cpf: str, telefone: str) -> Dict[str, Any]:
     resp_vinc = consultar_vinculos(headers, cpf)
@@ -487,6 +515,9 @@ def executar_fluxo_autorizado(headers: Dict[str, str], cpf: str, telefone: str) 
     }
 
 
+# =========================
+# FLUXO COMPLETO
+# =========================
 def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None) -> Dict[str, Any]:
     token = presenca_login_token()
     headers = auth_headers(token)
@@ -552,7 +583,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "parcela": parcela
         }
 
-    # 1) Se já veio autorizacao_id, tenta assinar e reprocessar
+    # 1) se já veio autorizacao_id
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
@@ -566,22 +597,28 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
                 "modo_assinatura": assinatura.get("modo")
             }
 
-        # espera e tenta novamente
         time.sleep(5)
-        resultado = tentar_fluxo_autorizado_local()
-        if resultado.get("status") == "sucesso":
-            return resultado
 
-        # retry extra
-        time.sleep(5)
-        return tentar_fluxo_autorizado_local()
+        try:
+            resp_vinc = tentar_vinculos_com_retry(headers, cpf, tentativas=3, espera=5)
+            if resp_vinc.status_code == 200:
+                return tentar_fluxo_autorizado_local()
+        except Exception as e:
+            print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
 
-    # 2) Primeira tentativa: pode já estar autorizado
+        return {
+            "status": "aguardando_autorizacao",
+            "autorizacao_id": autorizacao_id,
+            "link_autorizacao": None
+        }
+
+    # 2) primeira tentativa: talvez já esteja autorizado
     resp_vinc = consultar_vinculos(headers, cpf)
+
     if resp_vinc.status_code == 200:
         return tentar_fluxo_autorizado_local()
 
-    # 3) Se não está autorizado, gera termo
+    # 3) não autorizado -> gera termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -593,29 +630,28 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_termo": termo.get("detalhe_termo")
         }
 
-    # 4) ASSINA AUTOMATICAMENTE COM O BODY FIXO
+    # 4) autoassina imediatamente
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
 
     if assinatura_auto.get("ok"):
-        # primeira tentativa após autoassinatura
-        time.sleep(5)
-        resultado = tentar_fluxo_autorizado_local()
-        if resultado.get("status") == "sucesso":
-            return resultado
+        try:
+            time.sleep(5)
+            resp_vinc_2 = tentar_vinculos_com_retry(headers, cpf, tentativas=3, espera=5)
 
-        # segunda tentativa após mais alguns segundos
-        time.sleep(5)
-        resultado = tentar_fluxo_autorizado_local()
-        if resultado.get("status") == "sucesso":
-            return resultado
+            if resp_vinc_2.status_code == 200:
+                return tentar_fluxo_autorizado_local()
 
-    # 5) Só se realmente não deu certo, devolve aguardando_autorizacao
+        except Exception as e:
+            print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
+
+    # 5) só devolve pendência se não conseguiu mesmo
     return {
         "status": "aguardando_autorizacao",
         "autorizacao_id": novo_id,
         "link_autorizacao": link
     }
+
 
 # =========================
 # ROTAS
