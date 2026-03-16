@@ -522,17 +522,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    def tentar_fluxo_autorizado_local() -> Dict[str, Any]:
-        resp_vinc = consultar_vinculos(headers, cpf)
-
-        if resp_vinc.status_code != 200:
-            return {
-                "status": "erro",
-                "mensagem": f"Falha ao consultar vínculos: HTTP {resp_vinc.status_code}",
-                "detalhe_vinculos": safe_json(resp_vinc)
-            }
-
-        vinculos_body = safe_json(resp_vinc)
+    def processar_fluxo_com_vinculos_body(vinculos_body: Any) -> Dict[str, Any]:
         vinculos = extract_candidates_vinculos(vinculos_body)
         vinculo = pick_vinculo(vinculos)
 
@@ -602,7 +592,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         try:
             resp_vinc = tentar_vinculos_com_retry(headers, cpf, tentativas=3, espera=5)
             if resp_vinc.status_code == 200:
-                return tentar_fluxo_autorizado_local()
+                return processar_fluxo_com_vinculos_body(safe_json(resp_vinc))
         except Exception as e:
             print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
 
@@ -612,11 +602,20 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "link_autorizacao": None
         }
 
-    # 2) primeira tentativa: talvez já esteja autorizado
+    # 2) primeira tentativa direta
     resp_vinc = consultar_vinculos(headers, cpf)
 
+    # se já está autorizado, usa ESSA resposta e não consulta de novo
     if resp_vinc.status_code == 200:
-        return tentar_fluxo_autorizado_local()
+        return processar_fluxo_com_vinculos_body(safe_json(resp_vinc))
+
+    # se bateu rate limit já na primeira consulta
+    if resp_vinc.status_code == 429:
+        return {
+            "status": "erro",
+            "mensagem": "Rate limit do Presença atingido no endpoint de vínculos. Aguarde e tente novamente.",
+            "detalhe_vinculos": safe_json(resp_vinc)
+        }
 
     # 3) não autorizado -> gera termo
     termo = gerar_termo(headers, cpf, nome, telefone)
@@ -640,7 +639,14 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             resp_vinc_2 = tentar_vinculos_com_retry(headers, cpf, tentativas=3, espera=5)
 
             if resp_vinc_2.status_code == 200:
-                return tentar_fluxo_autorizado_local()
+                return processar_fluxo_com_vinculos_body(safe_json(resp_vinc_2))
+
+            if resp_vinc_2.status_code == 429:
+                return {
+                    "status": "erro",
+                    "mensagem": "Rate limit do Presença atingido no endpoint de vínculos. Aguarde e tente novamente.",
+                    "detalhe_vinculos": safe_json(resp_vinc_2)
+                }
 
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
@@ -651,8 +657,6 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         "autorizacao_id": novo_id,
         "link_autorizacao": link
     }
-
-
 # =========================
 # ROTAS
 # =========================
