@@ -16,14 +16,13 @@ BASE_URL = os.getenv("PRESENCA_BASE_URL", "https://presenca-bank-api.azurewebsit
 PRESENCA_LOGIN = os.getenv("PRESENCA_LOGIN", "")
 PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 
-# timeout base
 TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
-
-# controle de espera
 THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
 WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "12"))
 VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "4"))
 VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "5"))
+SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "60"))
+SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "60"))
 
 _LAST_CALL_TS = 0.0
 
@@ -85,18 +84,21 @@ def auth_headers(token: str) -> Dict[str, str]:
     }
 
 
-def is_rate_limit_response(resp: requests.Response) -> bool:
-    return resp.status_code == 429
+def body_contains(body: Any, *terms: str) -> bool:
+    text = str(body).lower()
+    return all(term.lower() in text for term in terms)
+
+
+def body_has_missing_authorization(body: Any) -> bool:
+    return (
+        "autorização válida" in str(body).lower()
+        or "autorizacao valida" in str(body).lower()
+    )
 
 
 def body_has_invalid_cpf_trabalhador(body: Any) -> bool:
     text = str(body).lower()
-    return "cpftrabalhador" in text and "inválido" in text
-
-
-def body_has_missing_authorization(body: Any) -> bool:
-    text = str(body).lower()
-    return "autorização válida" in text or "autorizacao valida" in text
+    return "cpftrabalhador" in text and "inválido" in text or "cpftrabalhador" in text and "invalido" in text
 
 
 def body_has_phone_already_used(body: Any) -> bool:
@@ -203,9 +205,6 @@ def find_first_id(obj: Any) -> Optional[str]:
     return None
 
 
-# =========================
-# REQUEST HELPERS
-# =========================
 def do_post(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 45)) -> requests.Response:
     throttle()
     return requests.post(url, json=payload, headers=headers, timeout=timeout)
@@ -224,10 +223,7 @@ def presenca_login_token() -> str:
         raise RuntimeError("PRESENCA_LOGIN_ou_SENHA_nao_configurada")
 
     url = f"{BASE_URL}/login"
-    payload = {
-        "login": PRESENCA_LOGIN,
-        "senha": PRESENCA_SENHA
-    }
+    payload = {"login": PRESENCA_LOGIN, "senha": PRESENCA_SENHA}
 
     print(f"[LOGIN] URL: {url}", flush=True)
     resp = do_post(url, payload, timeout=(10, 30))
@@ -291,7 +287,6 @@ def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> 
 
 def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any]:
     url = f"{BASE_URL}/consultas/termo-inss/{autorizacao_id}"
-
     headers_put = dict(headers)
     headers_put["tenant-id"] = "superuser"
 
@@ -325,7 +320,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
         resp = do_put(url, payload_user, headers=headers_put, timeout=(10, 20))
         body = safe_json(resp)
-
         print(f"[ASSINAR TERMO] STATUS USER: {resp.status_code}", flush=True)
         print(f"[ASSINAR TERMO] BODY USER: {body}", flush=True)
 
@@ -333,11 +327,7 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
             return {"ok": True, "detalhe": body, "modo": "user_payload"}
     except requests.exceptions.ReadTimeout as e:
         print(f"[ASSINAR TERMO] TIMEOUT USER: {str(e)}", flush=True)
-        return {
-            "ok": True,
-            "detalhe": {"warning": "timeout_no_put_user_payload"},
-            "modo": "user_payload_timeout"
-        }
+        return {"ok": True, "detalhe": {"warning": "timeout_no_put_user_payload"}, "modo": "user_payload_timeout"}
     except Exception as e:
         print(f"[ASSINAR TERMO] ERRO USER: {str(e)}", flush=True)
 
@@ -345,7 +335,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
         resp2 = do_put(url, payload_doc, headers=headers_put, timeout=(10, 20))
         body2 = safe_json(resp2)
-
         print(f"[ASSINAR TERMO] STATUS DOC: {resp2.status_code}", flush=True)
         print(f"[ASSINAR TERMO] BODY DOC: {body2}", flush=True)
 
@@ -355,11 +344,7 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         return {"ok": False, "detalhe": body2, "modo": "doc_payload"}
     except requests.exceptions.ReadTimeout as e:
         print(f"[ASSINAR TERMO] TIMEOUT DOC: {str(e)}", flush=True)
-        return {
-            "ok": True,
-            "detalhe": {"warning": "timeout_no_put_doc_payload"},
-            "modo": "doc_payload_timeout"
-        }
+        return {"ok": True, "detalhe": {"warning": "timeout_no_put_doc_payload"}, "modo": "doc_payload_timeout"}
     except Exception as e:
         print(f"[ASSINAR TERMO] ERRO DOC: {str(e)}", flush=True)
         return {"ok": False, "detalhe": {"erro": str(e)}, "modo": "doc_payload_exception"}
@@ -379,28 +364,27 @@ def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     return resp
 
 
-def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int = 4, espera: int = 5) -> requests.Response:
+def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int, espera: int) -> requests.Response:
     ultimo_response = None
     ultimo_erro = None
 
     for i in range(tentativas):
         try:
             resp = consultar_vinculos(headers, cpf)
+            body = safe_json(resp)
 
             if resp.status_code == 200:
                 return resp
 
-            body = safe_json(resp)
+            ultimo_response = resp
 
-            # se ainda está propagando autorização, continua tentando
-            if resp.status_code == 400 and (
-                body_has_missing_authorization(body) or body_has_invalid_cpf_trabalhador(body)
-            ):
-                ultimo_response = resp
+            # ainda propagando autorização
+            if resp.status_code == 400 and (body_has_missing_authorization(body) or body_has_invalid_cpf_trabalhador(body)):
+                pass
             elif resp.status_code == 429:
-                ultimo_response = resp
+                pass
             else:
-                ultimo_response = resp
+                pass
 
         except requests.exceptions.ReadTimeout as e:
             print(f"[VINCULOS RETRY] timeout tentativa {i+1}: {str(e)}", flush=True)
@@ -410,7 +394,7 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
             ultimo_erro = e
 
         if i < tentativas - 1:
-            print(f"[VINCULOS RETRY] aguardando {espera}s antes da próxima tentativa...", flush=True)
+            print(f"[VINCULOS RETRY] aguardando {espera}s...", flush=True)
             time.sleep(espera)
 
     if ultimo_response is not None:
@@ -426,40 +410,34 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
     time.sleep(2)
 
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-margem"
-    payload = {
-        "cpf": cpf,
-        "matricula": matricula,
-        "cnpj": cnpj
-    }
+    payload = {"cpf": cpf, "matricula": matricula, "cnpj": cnpj}
 
     print(f"[MARGEM] URL: {url}", flush=True)
     print(f"[MARGEM] PAYLOAD: {payload}", flush=True)
 
     try:
         resp = do_post(url, payload, headers=headers, timeout=(10, 60))
+        body = safe_json(resp)
+
         print(f"[MARGEM] STATUS: {resp.status_code}", flush=True)
-        print(f"[MARGEM] BODY: {safe_json(resp)}", flush=True)
+        print(f"[MARGEM] BODY: {body}", flush=True)
 
         if resp.status_code == 429:
-            return {
-                "erro_rate_limit": True,
-                "mensagem": "Limite de requisições atingido no endpoint de margem"
-            }
+            return {"erro_rate_limit": True, "mensagem": "Limite de requisições atingido no endpoint de margem"}
 
         resp.raise_for_status()
-        return resp.json()
+        return body
 
     except requests.exceptions.ReadTimeout:
-        return {
-            "erro_timeout": True,
-            "mensagem": "Timeout ao consultar margem"
-        }
+        return {"erro_timeout": True, "mensagem": "Timeout ao consultar margem"}
 
 
 def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cnpj: str, margem: dict) -> Any:
     url = f"{BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
     ddd, numero = split_phone(telefone)
+    valor_parcela = extract_valor_parcela(margem)
+    valor_solicitado = round(max(valor_parcela, 1) * SIMULACAO_MULTIPLICADOR, 2)
 
     payload = {
         "tomador": {
@@ -495,10 +473,10 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
             }
         },
         "proposta": {
-            "valorSolicitado": 0,
-            "quantidadeParcelas": 0,
+            "valorSolicitado": valor_solicitado,
+            "quantidadeParcelas": SIMULACAO_PRAZO_PADRAO,
             "produtoId": 28,
-            "valorParcela": margem.get("valorMargemDisponivel", 0)
+            "valorParcela": valor_parcela
         },
         "documentos": []
     }
@@ -507,11 +485,20 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
     print(f"[SIMULACAO] PAYLOAD: {payload}", flush=True)
 
     resp = do_post(url, payload, headers=headers, timeout=(10, 60))
+    body = safe_json(resp)
+
     print(f"[SIMULACAO] STATUS: {resp.status_code}", flush=True)
-    print(f"[SIMULACAO] BODY: {safe_json(resp)}", flush=True)
+    print(f"[SIMULACAO] BODY: {body}", flush=True)
+
+    if resp.status_code == 400:
+        return {
+            "erro_simulacao": True,
+            "mensagem": "Simulação recusada pelo banco",
+            "detalhe": body
+        }
 
     resp.raise_for_status()
-    return resp.json()
+    return body
 
 
 # =========================
@@ -567,6 +554,14 @@ def processar_fluxo_com_vinculos_body(headers: Dict[str, str], cpf: str, telefon
         }
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
+
+    if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
+        return {
+            "status": "erro",
+            "mensagem": "A simulação foi recusada pelo banco para este CPF.",
+            "detalhe": simulacao
+        }
+
     valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
 
     return {
@@ -584,7 +579,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    # 1) Segunda chamada explícita com autorizacao_id
+    # segunda chamada explícita
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
@@ -601,12 +596,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         time.sleep(WAIT_AFTER_AUTO_SIGN)
 
         try:
-            resp_vinc = tentar_vinculos_com_retry(
-                headers=headers,
-                cpf=cpf,
-                tentativas=VINCULOS_RETRY_TENTATIVAS,
-                espera=VINCULOS_RETRY_ESPERA
-            )
+            resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
 
             if resp_vinc.status_code == 200:
                 return processar_fluxo_com_vinculos_body(headers, cpf, telefone, safe_json(resp_vinc))
@@ -627,7 +617,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "link_autorizacao": None
         }
 
-    # 2) Primeira tentativa direta
+    # primeira tentativa direta
     resp_vinc = consultar_vinculos(headers, cpf)
 
     if resp_vinc.status_code == 200:
@@ -640,7 +630,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_vinculos": safe_json(resp_vinc)
         }
 
-    # 3) Não autorizado -> gera termo
+    # não autorizado -> gera termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -659,7 +649,6 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             "detalhe_termo": termo.get("detalhe_termo")
         }
 
-    # 4) Autoassina imediatamente
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
 
@@ -667,12 +656,7 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         try:
             time.sleep(WAIT_AFTER_AUTO_SIGN)
 
-            resp_vinc_2 = tentar_vinculos_com_retry(
-                headers=headers,
-                cpf=cpf,
-                tentativas=VINCULOS_RETRY_TENTATIVAS,
-                espera=VINCULOS_RETRY_ESPERA
-            )
+            resp_vinc_2 = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
 
             if resp_vinc_2.status_code == 200:
                 return processar_fluxo_com_vinculos_body(headers, cpf, telefone, safe_json(resp_vinc_2))
@@ -687,7 +671,6 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
 
-    # 5) Se não deu para concluir automaticamente, devolve pendência
     return {
         "status": "aguardando_autorizacao",
         "autorizacao_id": novo_id,
