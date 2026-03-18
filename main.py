@@ -21,11 +21,10 @@ THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
 WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "12"))
 VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "4"))
 VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "5"))
-SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "60"))
-SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "60"))
+SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "12"))
+SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
 
 _LAST_CALL_TS = 0.0
-
 
 # =========================
 # HELPERS
@@ -84,26 +83,62 @@ def auth_headers(token: str) -> Dict[str, str]:
     }
 
 
-def body_contains(body: Any, *terms: str) -> bool:
-    text = str(body).lower()
-    return all(term.lower() in text for term in terms)
+def find_first_url(obj: Any) -> Optional[str]:
+    if isinstance(obj, dict):
+        for _, v in obj.items():
+            found = find_first_url(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_first_url(item)
+            if found:
+                return found
+    elif isinstance(obj, str) and obj.startswith("http"):
+        return obj
+    return None
+
+
+def find_first_id(obj: Any) -> Optional[str]:
+    id_keys = {"id", "autorizacaoId", "authorizationId", "termoId"}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in id_keys and v:
+                return str(v)
+        for _, v in obj.items():
+            found = find_first_id(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_first_id(item)
+            if found:
+                return found
+    return None
+
+
+def body_text(body: Any) -> str:
+    return str(body).lower()
 
 
 def body_has_missing_authorization(body: Any) -> bool:
-    return (
-        "autorização válida" in str(body).lower()
-        or "autorizacao valida" in str(body).lower()
-    )
+    text = body_text(body)
+    return "autorização válida" in text or "autorizacao válida" in text or "autorizacao valida" in text
 
 
 def body_has_invalid_cpf_trabalhador(body: Any) -> bool:
-    text = str(body).lower()
-    return "cpftrabalhador" in text and "inválido" in text or "cpftrabalhador" in text and "invalido" in text
+    text = body_text(body)
+    return "cpftrabalhador" in text and ("inválido" in text or "invalido" in text)
 
 
 def body_has_phone_already_used(body: Any) -> bool:
-    text = str(body).lower()
+    text = body_text(body)
     return "telefone já utilizado" in text or "telefone ja utilizado" in text
+
+
+def body_has_cpf_not_found(body: Any) -> bool:
+    text = body_text(body)
+    return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
 
 
 def extract_candidates_vinculos(body: Any) -> List[dict]:
@@ -169,40 +204,6 @@ def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, flo
             return 0.0, fallback_parcela
 
     return 0.0, fallback_parcela
-
-
-def find_first_url(obj: Any) -> Optional[str]:
-    if isinstance(obj, dict):
-        for _, v in obj.items():
-            found = find_first_url(v)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = find_first_url(item)
-            if found:
-                return found
-    elif isinstance(obj, str) and obj.startswith("http"):
-        return obj
-    return None
-
-
-def find_first_id(obj: Any) -> Optional[str]:
-    id_keys = {"id", "autorizacaoId", "authorizationId", "termoId"}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in id_keys and v:
-                return str(v)
-        for _, v in obj.items():
-            found = find_first_id(v)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = find_first_id(item)
-            if found:
-                return found
-    return None
 
 
 def do_post(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 45)) -> requests.Response:
@@ -378,13 +379,23 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
             ultimo_response = resp
 
-            # ainda propagando autorização
-            if resp.status_code == 400 and (body_has_missing_authorization(body) or body_has_invalid_cpf_trabalhador(body)):
+            # erro definitivo: não está na base
+            if resp.status_code == 400 and body_has_cpf_not_found(body):
+                print("[VINCULOS] CPF não encontrado na base -> retorno imediato", flush=True)
+                return resp
+
+            # erro definitivo: cpf trabalhador inválido
+            if resp.status_code == 400 and body_has_invalid_cpf_trabalhador(body):
+                print("[VINCULOS] cpfTrabalhador inválido -> retorno imediato", flush=True)
+                return resp
+
+            # propagação/autorização ainda não refletiu
+            if resp.status_code == 400 and body_has_missing_authorization(body):
                 pass
             elif resp.status_code == 429:
                 pass
             else:
-                pass
+                return resp
 
         except requests.exceptions.ReadTimeout as e:
             print(f"[VINCULOS RETRY] timeout tentativa {i+1}: {str(e)}", flush=True)
@@ -437,6 +448,13 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
 
     ddd, numero = split_phone(telefone)
     valor_parcela = extract_valor_parcela(margem)
+
+    if valor_parcela <= 0:
+        return {
+            "erro_simulacao": True,
+            "mensagem": "Margem zerada ou sem parcela válida"
+        }
+
     valor_solicitado = round(max(valor_parcela, 1) * SIMULACAO_MULTIPLICADOR, 2)
 
     payload = {
@@ -509,11 +527,7 @@ def processar_fluxo_com_vinculos_body(headers: Dict[str, str], cpf: str, telefon
     vinculo = pick_vinculo(vinculos)
 
     if not vinculo:
-        return {
-            "status": "erro",
-            "mensagem": "Nenhum vínculo encontrado",
-            "detalhe_vinculos": vinculos_body
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     matricula = str(
         vinculo.get("matricula")
@@ -531,38 +545,26 @@ def processar_fluxo_com_vinculos_body(headers: Dict[str, str], cpf: str, telefon
     )
 
     if not matricula or not cnpj:
-        return {
-            "status": "erro",
-            "mensagem": "Não foi possível extrair matrícula/cnpj do vínculo",
-            "detalhe_vinculo": vinculo
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     margem = consultar_margem(headers, cpf, matricula, cnpj)
 
-    if isinstance(margem, dict) and margem.get("erro_rate_limit"):
-        return {
-            "status": "erro",
-            "mensagem": "Rate limit do Presença atingido. Aguarde e tente novamente.",
-            "detalhe": margem
-        }
+    if isinstance(margem, dict) and (margem.get("erro_rate_limit") or margem.get("erro_timeout")):
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
-    if isinstance(margem, dict) and margem.get("erro_timeout"):
-        return {
-            "status": "erro",
-            "mensagem": "A consulta de margem demorou demais no Presença. Tente novamente em instantes.",
-            "detalhe": margem
-        }
+    valor_parcela = extract_valor_parcela(margem)
+    if valor_parcela <= 0:
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
 
     if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
-        return {
-            "status": "erro",
-            "mensagem": "A simulação foi recusada pelo banco para este CPF.",
-            "detalhe": simulacao
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
-    valor_disponivel, parcela = extract_oferta(simulacao, extract_valor_parcela(margem))
+    valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
+
+    if valor_disponivel <= 0 or parcela <= 0:
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     return {
         "status": "sucesso",
@@ -579,34 +581,35 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    # segunda chamada explícita
+    # chamada explícita com autorizacao_id
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
 
         if not assinatura.get("ok"):
             return {
-                "status": "erro",
-                "mensagem": "Falha ao assinar termo com autorizacao_id",
+                "status": "aguardando_autorizacao",
                 "autorizacao_id": autorizacao_id,
-                "detalhe": assinatura.get("detalhe"),
-                "modo_assinatura": assinatura.get("modo")
+                "link_autorizacao": None
             }
 
         time.sleep(WAIT_AFTER_AUTO_SIGN)
 
         try:
             resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
+            body = safe_json(resp_vinc)
 
             if resp_vinc.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, safe_json(resp_vinc))
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body)
 
             if resp_vinc.status_code == 429:
-                return {
-                    "status": "erro",
-                    "mensagem": "Rate limit do Presença atingido no endpoint de vínculos. Aguarde e tente novamente.",
-                    "detalhe_vinculos": safe_json(resp_vinc)
-                }
+                return {"status": "sucesso", "elegibilidade": "nao"}
+
+            if resp_vinc.status_code == 400 and (
+                body_has_cpf_not_found(body)
+                or body_has_invalid_cpf_trabalhador(body)
+            ):
+                return {"status": "sucesso", "elegibilidade": "nao"}
 
         except Exception as e:
             print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
@@ -619,35 +622,29 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
 
     # primeira tentativa direta
     resp_vinc = consultar_vinculos(headers, cpf)
+    body_vinc = safe_json(resp_vinc)
 
     if resp_vinc.status_code == 200:
-        return processar_fluxo_com_vinculos_body(headers, cpf, telefone, safe_json(resp_vinc))
+        return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc)
 
     if resp_vinc.status_code == 429:
-        return {
-            "status": "erro",
-            "mensagem": "Rate limit do Presença atingido no endpoint de vínculos. Aguarde e tente novamente.",
-            "detalhe_vinculos": safe_json(resp_vinc)
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
-    # não autorizado -> gera termo
+    if resp_vinc.status_code == 400 and (
+        body_has_cpf_not_found(body_vinc)
+        or body_has_invalid_cpf_trabalhador(body_vinc)
+    ):
+        return {"status": "sucesso", "elegibilidade": "nao"}
+
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
 
     if termo.get("erro_telefone_reutilizado"):
-        return {
-            "status": "erro",
-            "mensagem": "Telefone já utilizado em termo para outro cliente. Use outro número para teste.",
-            "detalhe_termo": termo.get("detalhe_termo")
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     if not novo_id:
-        return {
-            "status": "erro",
-            "mensagem": "Não foi possível gerar autorizacao_id",
-            "detalhe_termo": termo.get("detalhe_termo")
-        }
+        return {"status": "sucesso", "elegibilidade": "nao"}
 
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
@@ -657,16 +654,19 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             time.sleep(WAIT_AFTER_AUTO_SIGN)
 
             resp_vinc_2 = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
+            body_vinc_2 = safe_json(resp_vinc_2)
 
             if resp_vinc_2.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, safe_json(resp_vinc_2))
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2)
 
             if resp_vinc_2.status_code == 429:
-                return {
-                    "status": "erro",
-                    "mensagem": "Rate limit do Presença atingido no endpoint de vínculos. Aguarde e tente novamente.",
-                    "detalhe_vinculos": safe_json(resp_vinc_2)
-                }
+                return {"status": "sucesso", "elegibilidade": "nao"}
+
+            if resp_vinc_2.status_code == 400 and (
+                body_has_cpf_not_found(body_vinc_2)
+                or body_has_invalid_cpf_trabalhador(body_vinc_2)
+            ):
+                return {"status": "sucesso", "elegibilidade": "nao"}
 
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
@@ -710,6 +710,6 @@ def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] =
     except Exception as e:
         print("[ERRO GERAL]", str(e), flush=True)
         return JSONResponse(
-            status_code=500,
-            content={"status": "erro", "mensagem": str(e)}
+            status_code=200,
+            content={"status": "sucesso", "elegibilidade": "nao"}
         )
