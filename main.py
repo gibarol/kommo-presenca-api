@@ -18,9 +18,9 @@ PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 
 TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
 THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
-WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "12"))
-VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "4"))
-VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "5"))
+WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "20"))
+VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "6"))
+VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "8"))
 SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "12"))
 SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
 
@@ -124,7 +124,13 @@ def body_text(body: Any) -> str:
 
 def body_has_missing_authorization(body: Any) -> bool:
     text = body_text(body)
-    return "autorização válida" in text or "autorizacao válida" in text or "autorizacao valida" in text
+    return (
+        "autorização válida" in text
+        or "autorizacao válida" in text
+        or "autorizacao valida" in text
+        or "necessario uma autorização válida" in text
+        or "necessário uma autorização válida" in text
+    )
 
 
 def body_has_invalid_cpf_trabalhador(body: Any) -> bool:
@@ -140,6 +146,24 @@ def body_has_phone_already_used(body: Any) -> bool:
 def body_has_cpf_not_found(body: Any) -> bool:
     text = body_text(body)
     return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
+
+
+def body_has_credito_trabalhador_competencia(body: Any) -> bool:
+    text = body_text(body)
+    return (
+        "linha de competência crédito do trabalhador" in text
+        or "linha de competencia credito do trabalhador" in text
+        or "crédito do trabalhador" in text
+        or "credito do trabalhador" in text
+    )
+
+
+def body_is_definitive_inelegible(body: Any) -> bool:
+    return any([
+        body_has_cpf_not_found(body),
+        body_has_invalid_cpf_trabalhador(body),
+        body_has_credito_trabalhador_competencia(body),
+    ])
 
 
 def extract_candidates_vinculos(body: Any) -> List[dict]:
@@ -234,7 +258,6 @@ def build_response(
             f"{link_autorizacao or ''}\n\n"
             "Assim que finalizar, me avise aqui para eu seguir com a análise."
         )
-
     elif elegibilidade == "sim":
         mensagem_cliente = (
             "Ótima notícia 🙌\n\n"
@@ -243,7 +266,6 @@ def build_response(
             f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
             "Se quiser, sigo com os próximos passos."
         )
-
     elif elegibilidade == "nao":
         mensagem_cliente = (
             "No momento não encontramos uma condição disponível para essa consulta.\n\n"
@@ -435,14 +457,12 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
             ultimo_response = resp
 
-            if resp.status_code == 400 and body_has_cpf_not_found(body):
-                print("[VINCULOS] CPF não encontrado na base -> retorno imediato", flush=True)
+            # erros definitivos: devolve na hora
+            if resp.status_code == 400 and body_is_definitive_inelegible(body):
+                print("[VINCULOS] erro definitivo de inelegibilidade -> retorno imediato", flush=True)
                 return resp
 
-            if resp.status_code == 400 and body_has_invalid_cpf_trabalhador(body):
-                print("[VINCULOS] cpfTrabalhador inválido -> retorno imediato", flush=True)
-                return resp
-
+            # falta de autorização: tenta novamente
             if resp.status_code == 400 and body_has_missing_authorization(body):
                 pass
             elif resp.status_code == 429:
@@ -647,6 +667,9 @@ def tentar_fluxo_completo(
     token = presenca_login_token()
     headers = auth_headers(token)
 
+    # =========================
+    # 1) CHAMADA EXPLÍCITA COM AUTORIZACAO_ID
+    # =========================
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
@@ -671,37 +694,54 @@ def tentar_fluxo_completo(
             if resp_vinc.status_code == 429:
                 return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-            if resp_vinc.status_code == 400 and (
-                body_has_cpf_not_found(body)
-                or body_has_invalid_cpf_trabalhador(body)
-            ):
+            if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body):
                 return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+            if resp_vinc.status_code == 400 and body_has_missing_authorization(body):
+                return build_response(
+                    lead_id=lead_id,
+                    status="aguardando_autorizacao",
+                    autorizacao_id=autorizacao_id,
+                    link_autorizacao=None
+                )
 
         except Exception as e:
             print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
 
         return build_response(
             lead_id=lead_id,
-            status="aguardando_autorizacao",
-            autorizacao_id=autorizacao_id,
-            link_autorizacao=None
+            status="sucesso",
+            elegibilidade="nao"
         )
 
-    resp_vinc = consultar_vinculos(headers, cpf)
-    body_vinc = safe_json(resp_vinc)
+    # =========================
+    # 2) PRIMEIRA TENTATIVA DIRETA EM VINCULOS
+    # IMPORTANTE: só gera termo se ficar claro que falta autorização
+    # =========================
+    try:
+        resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
+        body_vinc = safe_json(resp_vinc)
 
-    if resp_vinc.status_code == 200:
-        return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id)
+        if resp_vinc.status_code == 200:
+            return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id)
 
-    if resp_vinc.status_code == 429:
+        if resp_vinc.status_code == 429:
+            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+        if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body_vinc):
+            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+        # só segue para termo se o erro indicar falta de autorização
+        if not (resp_vinc.status_code == 400 and body_has_missing_authorization(body_vinc)):
+            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+    except Exception as e:
+        print(f"[VINCULOS INICIAL] erro antes de gerar termo: {str(e)}", flush=True)
         return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-    if resp_vinc.status_code == 400 and (
-        body_has_cpf_not_found(body_vinc)
-        or body_has_invalid_cpf_trabalhador(body_vinc)
-    ):
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
-
+    # =========================
+    # 3) GERAR TERMO APENAS QUANDO REALMENTE FALTA AUTORIZAÇÃO
+    # =========================
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -728,11 +768,24 @@ def tentar_fluxo_completo(
             if resp_vinc_2.status_code == 429:
                 return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-            if resp_vinc_2.status_code == 400 and (
-                body_has_cpf_not_found(body_vinc_2)
-                or body_has_invalid_cpf_trabalhador(body_vinc_2)
-            ):
+            if resp_vinc_2.status_code == 400 and body_is_definitive_inelegible(body_vinc_2):
                 return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+            if resp_vinc_2.status_code == 400 and body_has_missing_authorization(body_vinc_2):
+                print("[AUTOAUTORIZACAO] autorização ainda não refletiu, aguardando retry final...", flush=True)
+                time.sleep(10)
+
+                resp_vinc_3 = tentar_vinculos_com_retry(headers, cpf, 2, 5)
+                body_vinc_3 = safe_json(resp_vinc_3)
+
+                if resp_vinc_3.status_code == 200:
+                    return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_3, lead_id)
+
+                if resp_vinc_3.status_code == 429:
+                    return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+
+                if resp_vinc_3.status_code == 400 and body_is_definitive_inelegible(body_vinc_3):
+                    return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
