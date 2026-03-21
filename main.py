@@ -799,6 +799,7 @@ def tentar_fluxo_completo(
 
 
 # =========================
+# =========================
 # ROTAS
 # =========================
 @app.get("/")
@@ -806,8 +807,7 @@ def home():
     return {"status": "api rodando"}
 
 
-@app.get("/consulta")
-def consulta(
+def executar_consulta(
     cpf: str,
     nome: str,
     telefone: str,
@@ -848,3 +848,84 @@ def consulta(
                 elegibilidade="nao"
             )
         )
+
+
+@app.get("/consulta")
+def consulta_get(
+    cpf: str,
+    nome: str,
+    telefone: str,
+    autorizacao_id: Optional[str] = None,
+    lead_id: Optional[str] = None
+):
+    return executar_consulta(
+        cpf=cpf,
+        nome=nome,
+        telefone=telefone,
+        autorizacao_id=autorizacao_id,
+        lead_id=lead_id
+    )
+
+
+@app.post("/consulta")
+async def consulta_post(request: Request):
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+
+        data = {}
+
+        if "application/json" in content_type:
+            data = await request.json()
+        elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+            form = await request.form()
+            data = dict(form)
+        else:
+            # fallback: tenta json, senão query params
+            try:
+                data = await request.json()
+            except Exception:
+                data = dict(request.query_params)
+
+        cpf = str(data.get("cpf", "") or "")
+        nome = str(data.get("nome", "") or "")
+        telefone = str(data.get("telefone", "") or "")
+        autorizacao_id = data.get("autorizacao_id")
+        lead_id = data.get("lead_id")
+
+        print(f"[POST /consulta] DATA: {data}", flush=True)
+
+        return executar_consulta(
+            cpf=cpf,
+            nome=nome,
+            telefone=telefone,
+            autorizacao_id=autorizacao_id,
+            lead_id=lead_id
+        )
+
+    except Exception as e:
+        print("[ERRO POST /consulta]", str(e), flush=True)
+        return JSONResponse(
+            status_code=200,
+            content=build_response(
+                lead_id=None,
+                status="sucesso",
+                elegibilidade="nao"
+            )
+        )
+
+
+@app.get("/teste-kommo")
+def teste_kommo(
+    lead_id: Optional[str] = None,
+    cpf: Optional[str] = None,
+    nome: Optional[str] = None,
+    telefone: Optional[str] = None
+):
+    return {
+        "lead_id": lead_id,
+        "status": "sucesso",
+        "elegibilidade": "sim",
+        "valor_disponivel": 1000,
+        "parcela": 100,
+        "mensagem_cliente": "teste vindo do endpoint simples"
+    }
