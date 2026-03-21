@@ -145,7 +145,7 @@ def body_has_phone_already_used(body: Any) -> bool:
 
 def body_has_cpf_not_found(body: Any) -> bool:
     text = body_text(body)
-    return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
+    return "cpf não encontrado na base" in text or "cpf nao encontrado na base"
 
 
 def body_has_credito_trabalhador_competencia(body: Any) -> bool:
@@ -457,12 +457,10 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
             ultimo_response = resp
 
-            # erros definitivos: devolve na hora
             if resp.status_code == 400 and body_is_definitive_inelegible(body):
                 print("[VINCULOS] erro definitivo de inelegibilidade -> retorno imediato", flush=True)
                 return resp
 
-            # falta de autorização: tenta novamente
             if resp.status_code == 400 and body_has_missing_authorization(body):
                 pass
             elif resp.status_code == 429:
@@ -667,9 +665,6 @@ def tentar_fluxo_completo(
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    # =========================
-    # 1) CHAMADA EXPLÍCITA COM AUTORIZACAO_ID
-    # =========================
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
@@ -708,16 +703,8 @@ def tentar_fluxo_completo(
         except Exception as e:
             print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
 
-        return build_response(
-            lead_id=lead_id,
-            status="sucesso",
-            elegibilidade="nao"
-        )
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-    # =========================
-    # 2) PRIMEIRA TENTATIVA DIRETA EM VINCULOS
-    # IMPORTANTE: só gera termo se ficar claro que falta autorização
-    # =========================
     try:
         resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
         body_vinc = safe_json(resp_vinc)
@@ -731,7 +718,6 @@ def tentar_fluxo_completo(
         if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body_vinc):
             return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-        # só segue para termo se o erro indicar falta de autorização
         if not (resp_vinc.status_code == 400 and body_has_missing_authorization(body_vinc)):
             return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
@@ -739,9 +725,6 @@ def tentar_fluxo_completo(
         print(f"[VINCULOS INICIAL] erro antes de gerar termo: {str(e)}", flush=True)
         return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-    # =========================
-    # 3) GERAR TERMO APENAS QUANDO REALMENTE FALTA AUTORIZAÇÃO
-    # =========================
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -799,7 +782,6 @@ def tentar_fluxo_completo(
 
 
 # =========================
-# =========================
 # ROTAS
 # =========================
 @app.get("/")
@@ -807,7 +789,8 @@ def home():
     return {"status": "api rodando"}
 
 
-def executar_consulta(
+@app.get("/consulta")
+def consulta(
     cpf: str,
     nome: str,
     telefone: str,
@@ -848,119 +831,3 @@ def executar_consulta(
                 elegibilidade="nao"
             )
         )
-
-
-@app.get("/consulta")
-def consulta_get(
-    cpf: str,
-    nome: str,
-    telefone: str,
-    autorizacao_id: Optional[str] = None,
-    lead_id: Optional[str] = None
-):
-    return executar_consulta(
-        cpf=cpf,
-        nome=nome,
-        telefone=telefone,
-        autorizacao_id=autorizacao_id,
-        lead_id=lead_id
-    )
-
-
-@app.post("/consulta")
-async def consulta_post(request: Request):
-    try:
-        content_type = request.headers.get("content-type", "").lower()
-
-        data = {}
-
-        if "application/json" in content_type:
-            data = await request.json()
-        elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
-            form = await request.form()
-            data = dict(form)
-        else:
-            # fallback: tenta json, senão query params
-            try:
-                data = await request.json()
-            except Exception:
-                data = dict(request.query_params)
-
-        cpf = str(data.get("cpf", "") or "")
-        nome = str(data.get("nome", "") or "")
-        telefone = str(data.get("telefone", "") or "")
-        autorizacao_id = data.get("autorizacao_id")
-        lead_id = data.get("lead_id")
-
-        print(f"[POST /consulta] DATA: {data}", flush=True)
-
-        return executar_consulta(
-            cpf=cpf,
-            nome=nome,
-            telefone=telefone,
-            autorizacao_id=autorizacao_id,
-            lead_id=lead_id
-        )
-
-    except Exception as e:
-        print("[ERRO POST /consulta]", str(e), flush=True)
-        return JSONResponse(
-            status_code=200,
-            content=build_response(
-                lead_id=None,
-                status="sucesso",
-                elegibilidade="nao"
-            )
-        )
-
-
-@app.get("/teste-kommo")
-def teste_kommo(
-    lead_id: Optional[str] = None,
-    cpf: Optional[str] = None,
-    nome: Optional[str] = None,
-    telefone: Optional[str] = None
-):
-    return {
-        "lead_id": lead_id,
-        "status": "sucesso",
-        "elegibilidade": "sim",
-        "valor_disponivel": 1000,
-        "parcela": 100,
-        "mensagem_cliente": "teste vindo do endpoint simples"
-    }
-from fastapi import Request
-
-@app.post("/teste-post-kommo")
-async def teste_post_kommo(request: Request):
-    try:
-        content_type = request.headers.get("content-type", "")
-        raw_body = await request.body()
-
-        json_data = None
-        form_data = None
-
-        try:
-            json_data = await request.json()
-        except Exception:
-            pass
-
-        try:
-            form = await request.form()
-            form_data = dict(form)
-        except Exception:
-            pass
-
-        return {
-            "ok": True,
-            "content_type": content_type,
-            "raw_body": raw_body.decode("utf-8", errors="ignore"),
-            "json_data": json_data,
-            "form_data": form_data,
-            "query_params": dict(request.query_params)
-        }
-    except Exception as e:
-        return {
-            "ok": False,
-            "erro": str(e)
-        }
