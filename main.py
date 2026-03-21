@@ -863,15 +863,16 @@ async def kommo_webhook(payload: dict):
         # =========================
         # 2. CHAMAR API PRESENÇA
         # =========================
-        response = requests.post(
-            f"{BASE_URL}/simulacao",
-            json={
-                "cpf": cpf,
-                "nome": nome,
-                "telefone": telefone
-            },
-            timeout=30
-        )
+        response = requests.get(
+    "https://kommo-presenca-api.onrender.com/consulta",
+    params={
+        "cpf": cpf,
+        "nome": nome,
+        "telefone": telefone,
+        "lead_id": str(lead_id)
+    },
+    timeout=60
+)
 
         data = response.json()
         print("Resposta Presença:", data)
