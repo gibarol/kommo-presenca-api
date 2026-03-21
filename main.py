@@ -929,3 +929,38 @@ def teste_kommo(
         "parcela": 100,
         "mensagem_cliente": "teste vindo do endpoint simples"
     }
+from fastapi import Request
+
+@app.post("/teste-post-kommo")
+async def teste_post_kommo(request: Request):
+    try:
+        content_type = request.headers.get("content-type", "")
+        raw_body = await request.body()
+
+        json_data = None
+        form_data = None
+
+        try:
+            json_data = await request.json()
+        except Exception:
+            pass
+
+        try:
+            form = await request.form()
+            form_data = dict(form)
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "content_type": content_type,
+            "raw_body": raw_body.decode("utf-8", errors="ignore"),
+            "json_data": json_data,
+            "form_data": form_data,
+            "query_params": dict(request.query_params)
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "erro": str(e)
+        }
