@@ -831,3 +831,25 @@ def consulta(
                 elegibilidade="nao"
             )
         )
+from fastapi import Request
+
+@app.post("/webhook-kommo")
+async def webhook_kommo(request: Request):
+    try:
+        data = await request.json()
+        print("[WEBHOOK KOMMO RECEBIDO]", data, flush=True)
+
+        # Extrair lead_id (formato padrão Kommo)
+        lead_id = None
+
+        if "leads" in data and "status" in data["leads"]:
+            lead = data["leads"]["status"][0]
+            lead_id = lead.get("id")
+
+        print(f"[LEAD ID]: {lead_id}", flush=True)
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        print("[ERRO WEBHOOK KOMMO]", str(e), flush=True)
+        return {"status": "erro"}
