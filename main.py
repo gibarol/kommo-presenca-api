@@ -834,8 +834,9 @@ def consulta(
 from fastapi import Request
 
 @app.post("/kommo-webhook")
-async def kommo_webhook(payload: dict):
+async def kommo_webhook(request: Request):
     try:
+        payload = await request.json()
         # =========================
         # 1. PEGAR DADOS DO LEAD
         # =========================
