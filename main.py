@@ -26,6 +26,7 @@ SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
 
 _LAST_CALL_TS = 0.0
 
+
 # =========================
 # HELPERS
 # =========================
@@ -206,6 +207,61 @@ def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, flo
     return 0.0, fallback_parcela
 
 
+def format_brl(value: Any) -> str:
+    try:
+        n = float(value)
+        s = f"{n:,.2f}"
+        s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"R$ {s}"
+    except Exception:
+        return "R$ 0,00"
+
+
+def build_response(
+    lead_id: Optional[str],
+    status: str,
+    elegibilidade: Optional[str] = None,
+    valor_disponivel: Optional[float] = None,
+    parcela: Optional[float] = None,
+    autorizacao_id: Optional[str] = None,
+    link_autorizacao: Optional[str] = None
+) -> Dict[str, Any]:
+    mensagem_cliente = ""
+
+    if status == "aguardando_autorizacao":
+        mensagem_cliente = (
+            "Para continuar sua consulta, preciso que você conclua esta autorização rápida:\n\n"
+            f"{link_autorizacao or ''}\n\n"
+            "Assim que finalizar, me avise aqui para eu seguir com a análise."
+        )
+
+    elif elegibilidade == "sim":
+        mensagem_cliente = (
+            "Ótima notícia 🙌\n\n"
+            "Identificamos uma possibilidade para você.\n\n"
+            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
+            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
+            "Se quiser, sigo com os próximos passos."
+        )
+
+    elif elegibilidade == "nao":
+        mensagem_cliente = (
+            "No momento não encontramos uma condição disponível para essa consulta.\n\n"
+            "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
+        )
+
+    return {
+        "lead_id": lead_id,
+        "status": status,
+        "elegibilidade": elegibilidade,
+        "valor_disponivel": valor_disponivel,
+        "parcela": parcela,
+        "autorizacao_id": autorizacao_id,
+        "link_autorizacao": link_autorizacao,
+        "mensagem_cliente": mensagem_cliente
+    }
+
+
 def do_post(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 45)) -> requests.Response:
     throttle()
     return requests.post(url, json=payload, headers=headers, timeout=timeout)
@@ -379,17 +435,14 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
             ultimo_response = resp
 
-            # erro definitivo: não está na base
             if resp.status_code == 400 and body_has_cpf_not_found(body):
                 print("[VINCULOS] CPF não encontrado na base -> retorno imediato", flush=True)
                 return resp
 
-            # erro definitivo: cpf trabalhador inválido
             if resp.status_code == 400 and body_has_invalid_cpf_trabalhador(body):
                 print("[VINCULOS] cpfTrabalhador inválido -> retorno imediato", flush=True)
                 return resp
 
-            # propagação/autorização ainda não refletiu
             if resp.status_code == 400 and body_has_missing_authorization(body):
                 pass
             elif resp.status_code == 429:
@@ -522,12 +575,18 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
 # =========================
 # PROCESSAMENTO
 # =========================
-def processar_fluxo_com_vinculos_body(headers: Dict[str, str], cpf: str, telefone: str, vinculos_body: Any) -> Dict[str, Any]:
+def processar_fluxo_com_vinculos_body(
+    headers: Dict[str, str],
+    cpf: str,
+    telefone: str,
+    vinculos_body: Any,
+    lead_id: Optional[str]
+) -> Dict[str, Any]:
     vinculos = extract_candidates_vinculos(vinculos_body)
     vinculo = pick_vinculo(vinculos)
 
     if not vinculo:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     matricula = str(
         vinculo.get("matricula")
@@ -545,53 +604,60 @@ def processar_fluxo_com_vinculos_body(headers: Dict[str, str], cpf: str, telefon
     )
 
     if not matricula or not cnpj:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     margem = consultar_margem(headers, cpf, matricula, cnpj)
 
     if isinstance(margem, dict) and (margem.get("erro_rate_limit") or margem.get("erro_timeout")):
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     valor_parcela = extract_valor_parcela(margem)
     if valor_parcela <= 0:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
 
     if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
 
     if valor_disponivel <= 0 or parcela <= 0:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
-    return {
-        "status": "sucesso",
-        "elegibilidade": "sim",
-        "valor_disponivel": valor_disponivel,
-        "parcela": parcela
-    }
+    return build_response(
+        lead_id=lead_id,
+        status="sucesso",
+        elegibilidade="sim",
+        valor_disponivel=valor_disponivel,
+        parcela=parcela
+    )
 
 
 # =========================
 # FLUXO COMPLETO
 # =========================
-def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None) -> Dict[str, Any]:
+def tentar_fluxo_completo(
+    cpf: str,
+    nome: str,
+    telefone: str,
+    lead_id: Optional[str],
+    autorizacao_id: Optional[str] = None
+) -> Dict[str, Any]:
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    # chamada explícita com autorizacao_id
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
 
         if not assinatura.get("ok"):
-            return {
-                "status": "aguardando_autorizacao",
-                "autorizacao_id": autorizacao_id,
-                "link_autorizacao": None
-            }
+            return build_response(
+                lead_id=lead_id,
+                status="aguardando_autorizacao",
+                autorizacao_id=autorizacao_id,
+                link_autorizacao=None
+            )
 
         time.sleep(WAIT_AFTER_AUTO_SIGN)
 
@@ -600,51 +666,51 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             body = safe_json(resp_vinc)
 
             if resp_vinc.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body)
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body, lead_id)
 
             if resp_vinc.status_code == 429:
-                return {"status": "sucesso", "elegibilidade": "nao"}
+                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
             if resp_vinc.status_code == 400 and (
                 body_has_cpf_not_found(body)
                 or body_has_invalid_cpf_trabalhador(body)
             ):
-                return {"status": "sucesso", "elegibilidade": "nao"}
+                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
         except Exception as e:
             print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
 
-        return {
-            "status": "aguardando_autorizacao",
-            "autorizacao_id": autorizacao_id,
-            "link_autorizacao": None
-        }
+        return build_response(
+            lead_id=lead_id,
+            status="aguardando_autorizacao",
+            autorizacao_id=autorizacao_id,
+            link_autorizacao=None
+        )
 
-    # primeira tentativa direta
     resp_vinc = consultar_vinculos(headers, cpf)
     body_vinc = safe_json(resp_vinc)
 
     if resp_vinc.status_code == 200:
-        return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc)
+        return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id)
 
     if resp_vinc.status_code == 429:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     if resp_vinc.status_code == 400 and (
         body_has_cpf_not_found(body_vinc)
         or body_has_invalid_cpf_trabalhador(body_vinc)
     ):
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
 
     if termo.get("erro_telefone_reutilizado"):
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     if not novo_id:
-        return {"status": "sucesso", "elegibilidade": "nao"}
+        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
     assinatura_auto = assinar_termo(headers, novo_id)
     print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
@@ -657,25 +723,26 @@ def tentar_fluxo_completo(cpf: str, nome: str, telefone: str, autorizacao_id: Op
             body_vinc_2 = safe_json(resp_vinc_2)
 
             if resp_vinc_2.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2)
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2, lead_id)
 
             if resp_vinc_2.status_code == 429:
-                return {"status": "sucesso", "elegibilidade": "nao"}
+                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
             if resp_vinc_2.status_code == 400 and (
                 body_has_cpf_not_found(body_vinc_2)
                 or body_has_invalid_cpf_trabalhador(body_vinc_2)
             ):
-                return {"status": "sucesso", "elegibilidade": "nao"}
+                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
 
         except Exception as e:
             print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
 
-    return {
-        "status": "aguardando_autorizacao",
-        "autorizacao_id": novo_id,
-        "link_autorizacao": link
-    }
+    return build_response(
+        lead_id=lead_id,
+        status="aguardando_autorizacao",
+        autorizacao_id=novo_id,
+        link_autorizacao=link
+    )
 
 
 # =========================
@@ -687,21 +754,32 @@ def home():
 
 
 @app.get("/consulta")
-def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None):
+def consulta(
+    cpf: str,
+    nome: str,
+    telefone: str,
+    autorizacao_id: Optional[str] = None,
+    lead_id: Optional[str] = None
+):
     try:
         cpf = normalize_cpf(cpf)
         telefone = normalize_phone(telefone)
 
         if not cpf:
             return JSONResponse(
-                status_code=400,
-                content={"status": "erro", "mensagem": "CPF inválido"}
+                status_code=200,
+                content=build_response(
+                    lead_id=lead_id,
+                    status="sucesso",
+                    elegibilidade="nao"
+                )
             )
 
         resultado = tentar_fluxo_completo(
             cpf=cpf,
             nome=nome,
             telefone=telefone,
+            lead_id=lead_id,
             autorizacao_id=autorizacao_id
         )
 
@@ -711,5 +789,9 @@ def consulta(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] =
         print("[ERRO GERAL]", str(e), flush=True)
         return JSONResponse(
             status_code=200,
-            content={"status": "sucesso", "elegibilidade": "nao"}
+            content=build_response(
+                lead_id=lead_id,
+                status="sucesso",
+                elegibilidade="nao"
+            )
         )
