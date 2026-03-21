@@ -833,27 +833,79 @@ def consulta(
         )
 from fastapi import Request
 
-@app.post("/webhook-kommo")
-async def webhook_kommo(request: Request):
+@app.post("/kommo-webhook")
+async def kommo_webhook(payload: dict):
     try:
-        try:
-            data = await request.json()
-        except:
-            data = {}
+        # =========================
+        # 1. PEGAR DADOS DO LEAD
+        # =========================
+        lead = payload.get("_embedded", {}).get("leads", [])[0]
 
-        print("[WEBHOOK KOMMO RAW]", data, flush=True)
+        lead_id = lead.get("id")
+        nome = lead.get("name")
 
-        lead_id = None
+        # CPF (campo personalizado)
+        cpf = None
+        for campo in lead.get("custom_fields_values", []):
+            if campo.get("field_id") == 974096:
+                cpf = campo.get("values", [])[0].get("value")
 
-        if "leads" in data and "status" in data["leads"]:
-            lead = data["leads"]["status"][0]
-            lead_id = lead.get("id")
+        # Telefone
+        telefone = None
+        contatos = lead.get("_embedded", {}).get("contacts", [])
+        if contatos:
+            telefone = contatos[0].get("custom_fields_values", [])[0].get("values", [])[0].get("value")
 
-        print(f"[LEAD ID]: {lead_id}", flush=True)
+        print("CPF:", cpf)
+        print("Nome:", nome)
+        print("Telefone:", telefone)
+
+        # =========================
+        # 2. CHAMAR API PRESENÇA
+        # =========================
+        response = requests.post(
+            f"{BASE_URL}/simulacao",
+            json={
+                "cpf": cpf,
+                "nome": nome,
+                "telefone": telefone
+            },
+            timeout=30
+        )
+
+        data = response.json()
+        print("Resposta Presença:", data)
+
+        # =========================
+        # 3. TRATAR RESPOSTA
+        # =========================
+        elegivel = data.get("elegivel")
+        valor = data.get("valorDisponivel")
+        parcela = data.get("parcela")
+
+        if elegivel:
+            mensagem = f"🔥 Temos uma condição pra você!\n\n💰 Valor: R$ {valor}\n📉 Parcela: R$ {parcela}"
+        else:
+            mensagem = "No momento não encontramos oferta disponível 😕"
+
+        # =========================
+        # 4. ENVIAR NOTA NO KOMMO
+        # =========================
+        url = f"https://{os.getenv('KOMMO_SUBDOMAIN')}.kommo.com/api/v4/leads/{lead_id}/notes"
+
+        headers = {
+            "Authorization": f"Bearer {os.getenv('KOMMO_TOKEN')}"
+        }
+
+        requests.post(url, json=[{
+            "note_type": "common",
+            "params": {
+                "text": mensagem
+            }
+        }], headers=headers)
 
         return {"status": "ok"}
 
     except Exception as e:
-        print("[ERRO WEBHOOK KOMMO]", str(e), flush=True)
-        return {"status": "erro"}
-        return {"status": "erro"}
+        print("ERRO:", str(e))
+        return {"erro": str(e)}
