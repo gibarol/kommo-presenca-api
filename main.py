@@ -836,10 +836,13 @@ from fastapi import Request
 @app.post("/webhook-kommo")
 async def webhook_kommo(request: Request):
     try:
-        data = await request.json()
-        print("[WEBHOOK KOMMO RECEBIDO]", data, flush=True)
+        try:
+            data = await request.json()
+        except:
+            data = {}
 
-        # Extrair lead_id (formato padrão Kommo)
+        print("[WEBHOOK KOMMO RAW]", data, flush=True)
+
         lead_id = None
 
         if "leads" in data and "status" in data["leads"]:
@@ -852,4 +855,5 @@ async def webhook_kommo(request: Request):
 
     except Exception as e:
         print("[ERRO WEBHOOK KOMMO]", str(e), flush=True)
+        return {"status": "erro"}
         return {"status": "erro"}
