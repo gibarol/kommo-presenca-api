@@ -4,7 +4,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
@@ -16,6 +16,9 @@ BASE_URL = os.getenv("PRESENCA_BASE_URL", "https://presenca-bank-api.azurewebsit
 PRESENCA_LOGIN = os.getenv("PRESENCA_LOGIN", "")
 PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 
+KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "")
+KOMMO_SUBDOMAIN = os.getenv("KOMMO_SUBDOMAIN", "")
+
 TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
 THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
 WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "20"))
@@ -23,6 +26,8 @@ VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "6"))
 VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "8"))
 SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "12"))
 SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
+
+CPF_FIELD_ID = 974096
 
 _LAST_CALL_TS = 0.0
 
@@ -292,6 +297,109 @@ def do_post(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, t
 def do_put(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 20)) -> requests.Response:
     throttle()
     return requests.put(url, json=payload, headers=headers, timeout=timeout)
+
+
+# =========================
+# KOMMO HELPERS
+# =========================
+def kommo_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {KOMMO_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+
+def extrair_lead_id_do_webhook(payload: Any) -> Optional[str]:
+    try:
+        if isinstance(payload, dict):
+            if "leads" in payload and isinstance(payload["leads"], dict):
+                status_arr = payload["leads"].get("status", [])
+                if status_arr and isinstance(status_arr[0], dict):
+                    if status_arr[0].get("id"):
+                        return str(status_arr[0]["id"])
+
+            embedded = payload.get("_embedded", {})
+            leads = embedded.get("leads", [])
+            if leads and isinstance(leads[0], dict) and leads[0].get("id"):
+                return str(leads[0]["id"])
+    except Exception:
+        pass
+    return None
+
+
+def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
+    if not KOMMO_TOKEN or not KOMMO_SUBDOMAIN:
+        print("[KOMMO] token ou subdomínio ausente", flush=True)
+        return None
+
+    lead_url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}?with=contacts"
+    print(f"[KOMMO] LEAD URL: {lead_url}", flush=True)
+
+    lead_resp = requests.get(lead_url, headers=kommo_headers(), timeout=30)
+    print(f"[KOMMO] LEAD STATUS: {lead_resp.status_code}", flush=True)
+    print(f"[KOMMO] LEAD BODY: {lead_resp.text[:2000]}", flush=True)
+
+    if not lead_resp.ok:
+        return None
+
+    lead_data = safe_json(lead_resp)
+
+    nome = lead_data.get("name", "")
+
+    cpf = ""
+    for field in lead_data.get("custom_fields_values", []) or []:
+        if field.get("field_id") == CPF_FIELD_ID:
+            values = field.get("values", [])
+            if values:
+                cpf = str(values[0].get("value", "") or "")
+                break
+
+    telefone = ""
+    contatos = lead_data.get("_embedded", {}).get("contacts", []) or []
+    if contatos:
+        contato_id = contatos[0].get("id")
+        if contato_id:
+            contato_url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/{contato_id}"
+            print(f"[KOMMO] CONTATO URL: {contato_url}", flush=True)
+
+            contato_resp = requests.get(contato_url, headers=kommo_headers(), timeout=30)
+            print(f"[KOMMO] CONTATO STATUS: {contato_resp.status_code}", flush=True)
+            print(f"[KOMMO] CONTATO BODY: {contato_resp.text[:2000]}", flush=True)
+
+            if contato_resp.ok:
+                contato_data = safe_json(contato_resp)
+                for field in contato_data.get("custom_fields_values", []) or []:
+                    if field.get("field_code") == "PHONE":
+                        values = field.get("values", [])
+                        if values:
+                            telefone = str(values[0].get("value", "") or "")
+                            break
+
+    return {
+        "cpf": cpf,
+        "nome": nome,
+        "telefone": telefone
+    }
+
+
+def criar_nota_kommo(lead_id: str, texto: str) -> None:
+    if not lead_id or not texto:
+        return
+
+    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}/notes"
+    body = [{
+        "note_type": "common",
+        "params": {
+            "text": texto
+        }
+    }]
+
+    try:
+        resp = requests.post(url, headers=kommo_headers(), json=body, timeout=30)
+        print(f"[KOMMO] NOTA STATUS: {resp.status_code}", flush=True)
+        print(f"[KOMMO] NOTA BODY: {resp.text[:1000]}", flush=True)
+    except Exception as e:
+        print(f"[KOMMO] ERRO AO CRIAR NOTA: {str(e)}", flush=True)
 
 
 # =========================
@@ -831,89 +939,76 @@ def consulta(
                 elegibilidade="nao"
             )
         )
-from fastapi import Request
+
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
     try:
-        payload = await request.json()
-        # =========================
-        # 1. PEGAR DADOS DO LEAD
-        # =========================
-        lead = payload.get("_embedded", {}).get("leads", [])[0]
+        raw_body = await request.body()
+        print("[KOMMO RAW BODY]", raw_body.decode("utf-8", errors="ignore"), flush=True)
 
-        lead_id = lead.get("id")
-        nome = lead.get("name")
+        payload = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
 
-        # CPF (campo personalizado)
-        cpf = None
-        for campo in lead.get("custom_fields_values", []):
-            if campo.get("field_id") == 974096:
-                cpf = campo.get("values", [])[0].get("value")
+        print("[KOMMO PAYLOAD]", payload, flush=True)
 
-        # Telefone
-        telefone = None
-        contatos = lead.get("_embedded", {}).get("contacts", [])
-        if contatos:
-            telefone = contatos[0].get("custom_fields_values", [])[0].get("values", [])[0].get("value")
+        lead_id = extrair_lead_id_do_webhook(payload)
+        print("[KOMMO LEAD ID EXTRAIDO]", lead_id, flush=True)
 
-        print("CPF:", cpf)
-        print("Nome:", nome)
-        print("Telefone:", telefone)
+        if not lead_id:
+            return {"status": "ok", "mensagem": "lead_id_nao_encontrado"}
 
-        # =========================
-        # 2. CHAMAR API PRESENÇA
-        # =========================
+        dados_lead = buscar_lead_kommo(lead_id)
+        print("[KOMMO DADOS LEAD]", dados_lead, flush=True)
+
+        if not dados_lead:
+            criar_nota_kommo(lead_id, "Erro ao buscar os dados do lead no Kommo.")
+            return {"status": "ok", "mensagem": "erro_busca_lead"}
+
+        cpf = normalize_cpf(dados_lead.get("cpf"))
+        nome = str(dados_lead.get("nome") or "")
+        telefone = normalize_phone(dados_lead.get("telefone"))
+
+        print(f"[KOMMO DADOS NORMALIZADOS] CPF={cpf} | NOME={nome} | TEL={telefone}", flush=True)
+
+        if not cpf or not nome or not telefone:
+            criar_nota_kommo(
+                lead_id,
+                "Não foi possível consultar: faltam dados obrigatórios no lead (CPF, nome ou telefone)."
+            )
+            return {"status": "ok", "mensagem": "dados_incompletos"}
+
         response = requests.get(
-    "https://kommo-presenca-api.onrender.com/consulta",
-    params={
-        "cpf": cpf,
-        "nome": nome,
-        "telefone": telefone,
-        "lead_id": str(lead_id)
-    },
-    timeout=60
-)
+            "https://kommo-presenca-api.onrender.com/consulta",
+            params={
+                "cpf": cpf,
+                "nome": nome,
+                "telefone": telefone,
+                "lead_id": str(lead_id)
+            },
+            timeout=60
+        )
 
-print("STATUS PRESENÇA:", response.status_code)
-print("TEXTO PRESENÇA:", response.text)
+        print("[STATUS PRESENÇA]", response.status_code, flush=True)
+        print("[TEXTO PRESENÇA]", response.text, flush=True)
 
-try:
-    data = response.json()
-except:
-    print("ERRO AO LER JSON:", response.text)
-    return {"erro": "resposta inválida da consulta"}
+        try:
+            data = response.json()
+        except Exception:
+            criar_nota_kommo(lead_id, "Erro ao interpretar a resposta da consulta Presença.")
+            return {"status": "ok", "mensagem": "resposta_invalida_consulta"}
 
-        # =========================
-        # 3. TRATAR RESPOSTA
-        # =========================
-        elegivel = data.get("elegivel")
-        valor = data.get("valorDisponivel")
-        parcela = data.get("parcela")
+        mensagem_cliente = data.get("mensagem_cliente") or ""
+        if not mensagem_cliente:
+            mensagem_cliente = "Consulta processada, mas sem mensagem formatada."
 
-        if elegivel:
-            mensagem = f"🔥 Temos uma condição pra você!\n\n💰 Valor: R$ {valor}\n📉 Parcela: R$ {parcela}"
-        else:
-            mensagem = "No momento não encontramos oferta disponível 😕"
+        criar_nota_kommo(lead_id, mensagem_cliente)
 
-        # =========================
-        # 4. ENVIAR NOTA NO KOMMO
-        # =========================
-        url = f"https://{os.getenv('KOMMO_SUBDOMAIN')}.kommo.com/api/v4/leads/{lead_id}/notes"
-
-        headers = {
-            "Authorization": f"Bearer {os.getenv('KOMMO_TOKEN')}"
-        }
-
-        requests.post(url, json=[{
-            "note_type": "common",
-            "params": {
-                "text": mensagem
-            }
-        }], headers=headers)
-
-        return {"status": "ok"}
+        return {"status": "ok", "resultado": data}
 
     except Exception as e:
-        print("ERRO:", str(e))
-        return {"erro": str(e)}
+        print("[ERRO /kommo-webhook]", str(e), flush=True)
+        return {"status": "erro", "mensagem": str(e)}
