@@ -31,6 +31,15 @@ SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
 
 CPF_FIELD_ID = 974096
 
+TAG_ELEGIVEL = os.getenv("KOMMO_TAG_ELEGIVEL", "Elegível CLT")
+TAG_NAO_ELEGIVEL = os.getenv("KOMMO_TAG_NAO_ELEGIVEL", "Não Elegível CLT")
+TAG_AGUARDANDO_AUTORIZACAO = os.getenv("KOMMO_TAG_AGUARDANDO_AUTORIZACAO", "Aguardando Autorização CLT")
+TAG_AGUARDANDO_VIRADA = os.getenv("KOMMO_TAG_AGUARDANDO_VIRADA", "Aguardando Virada de Folha")
+
+STATUS_SUCESSO = "sucesso"
+STATUS_AGUARDANDO_AUTORIZACAO = "aguardando_autorizacao"
+STATUS_AGUARDANDO_VIRADA_FOLHA = "aguardando_virada_folha"
+
 _LAST_CALL_TS = 0.0
 
 
@@ -81,11 +90,9 @@ def normalize_phone(value: Any) -> str:
         log_step("PHONE", "Telefone vazio", {"original": original})
         return ""
 
-    # Remove código do país se vier
     if digits.startswith("55") and len(digits) > 11:
         digits = digits[2:]
 
-    # Caso clássico: DDD + 8 dígitos
     if len(digits) == 10:
         treated = digits[:2] + "9" + digits[2:]
         log_step("PHONE", "Telefone com 10 dígitos, inserido 9", {
@@ -95,11 +102,9 @@ def normalize_phone(value: Any) -> str:
         })
         return treated
 
-    # Já está ok
     if len(digits) == 11:
         return digits
 
-    # Se veio grande demais, tenta últimos 11
     if len(digits) > 11:
         tail = digits[-11:]
         if len(tail) == 11:
@@ -110,8 +115,6 @@ def normalize_phone(value: Any) -> str:
             })
             return tail
 
-    # Tentativa adicional:
-    # pega DDD + últimos 8 dígitos e coloca 9 no meio
     if len(digits) >= 10:
         ddd = digits[:2]
         ultimos_8 = digits[-8:]
@@ -162,6 +165,11 @@ def auth_headers(token: str) -> Dict[str, str]:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
+
+
+def first_name(nome: Optional[str]) -> str:
+    texto = str(nome or "").strip()
+    return texto.split(" ")[0] if texto else ""
 
 
 def find_first_url(obj: Any) -> Optional[str]:
@@ -228,6 +236,17 @@ def body_has_cpf_not_found(body: Any) -> bool:
     return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
 
 
+def body_has_virada_folha(body: Any) -> bool:
+    text = body_text(body)
+    return (
+        "virada de competencia credito do trabalhador" in text
+        or "virada de competência crédito do trabalhador" in text
+        or "virada de competencia crédito do trabalhador" in text
+        or "virada de competência credito do trabalhador" in text
+        or "virada de folha" in text
+    )
+
+
 def body_has_credito_trabalhador_competencia(body: Any) -> bool:
     text = body_text(body)
     return (
@@ -239,6 +258,8 @@ def body_has_credito_trabalhador_competencia(body: Any) -> bool:
 
 
 def body_is_definitive_inelegible(body: Any) -> bool:
+    if body_has_virada_folha(body):
+        return False
     return any([
         body_has_cpf_not_found(body),
         body_has_invalid_cpf_trabalhador(body),
@@ -321,6 +342,31 @@ def format_brl(value: Any) -> str:
         return "R$ 0,00"
 
 
+def limpar_mensagem_tecnica(msg: Any) -> str:
+    texto = str(msg or "").strip()
+    texto_lower = texto.lower()
+
+    if body_has_virada_folha(texto):
+        return "Virada de folha"
+
+    if "cpf não encontrado na base" in texto_lower or "cpf nao encontrado na base" in texto_lower:
+        return "CPF não encontrado na base"
+
+    if "telefone já utilizado" in texto_lower or "telefone ja utilizado" in texto_lower:
+        return "Telefone já utilizado em outro termo"
+
+    if "margem zerada" in texto_lower:
+        return "Margem zerada"
+
+    if "rate limit" in texto_lower:
+        return "Limite temporário de consultas atingido"
+
+    if "autorização ainda não refletiu" in texto_lower or "autorizacao ainda não refletiu" in texto_lower:
+        return "Autorização ainda em processamento"
+
+    return texto or "-"
+
+
 def build_response(
     lead_id: Optional[str],
     status: str,
@@ -329,26 +375,42 @@ def build_response(
     parcela: Optional[float] = None,
     autorizacao_id: Optional[str] = None,
     link_autorizacao: Optional[str] = None,
-    mensagem_tecnica: Optional[str] = None
+    mensagem_tecnica: Optional[str] = None,
+    nome: Optional[str] = None
 ) -> Dict[str, Any]:
+    primeiro_nome = first_name(nome)
+    saudacao_nome = f"{primeiro_nome}, " if primeiro_nome else ""
+
     mensagem_cliente = ""
 
-    if status == "aguardando_autorizacao":
+    if status == STATUS_AGUARDANDO_AUTORIZACAO:
         mensagem_cliente = (
+            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "Para continuar sua consulta, preciso que você conclua esta autorização rápida:\n\n"
             f"{link_autorizacao or ''}\n\n"
             "Assim que finalizar, me avise aqui para eu seguir com a análise."
         )
+
+    elif status == STATUS_AGUARDANDO_VIRADA_FOLHA:
+        mensagem_cliente = (
+            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
+            "Sua consulta está em período de virada de folha.\n\n"
+            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês.\n\n"
+            "📌 Assim que a base normalizar, posso consultar novamente para você."
+        )
+
     elif elegibilidade == "sim":
         mensagem_cliente = (
-            "Ótima notícia 🙌\n\n"
-            "Identificamos uma possibilidade para você.\n\n"
+            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
+            "Temos uma boa notícia por aqui.\n\n"
             f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
             f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
-            "Se quiser, sigo com os próximos passos."
+            "Se quiser, sigo com os próximos passos para você."
         )
+
     elif elegibilidade == "nao":
         mensagem_cliente = (
+            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "No momento não encontramos uma condição disponível para essa consulta.\n\n"
             "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
         )
@@ -485,6 +547,68 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
         log_step("KOMMO_NOTA", f"Erro ao criar nota: {str(e)}")
 
 
+def buscar_ou_criar_tag_kommo(nome_tag: str) -> Optional[int]:
+    if not nome_tag:
+        return None
+
+    try:
+        url_busca = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/tags"
+        resp = requests.get(url_busca, headers=kommo_headers(), params={"query": nome_tag}, timeout=30)
+        log_step("KOMMO_TAG", f"Busca tag status: {resp.status_code}", resp.text[:1000])
+
+        if resp.ok:
+            data = safe_json(resp)
+            tags = data.get("_embedded", {}).get("tags", []) if isinstance(data, dict) else []
+            for tag in tags:
+                if str(tag.get("name", "")).strip().lower() == nome_tag.strip().lower():
+                    return int(tag["id"])
+
+        url_create = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/tags"
+        payload = [{"name": nome_tag}]
+        resp_create = requests.post(url_create, headers=kommo_headers(), json=payload, timeout=30)
+        log_step("KOMMO_TAG", f"Criação tag status: {resp_create.status_code}", resp_create.text[:1000])
+
+        if resp_create.ok:
+            data_create = safe_json(resp_create)
+            embedded = data_create.get("_embedded", {}).get("tags", []) if isinstance(data_create, dict) else []
+            if embedded:
+                return int(embedded[0]["id"])
+
+    except Exception as e:
+        log_step("KOMMO_TAG", f"Erro ao buscar/criar tag: {str(e)}")
+
+    return None
+
+
+def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
+    if not lead_id or not nomes_tags:
+        return
+
+    tags_payload = []
+    for nome_tag in nomes_tags:
+        nome_tag = str(nome_tag or "").strip()
+        if not nome_tag:
+            continue
+        tags_payload.append({"name": nome_tag})
+
+    if not tags_payload:
+        return
+
+    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+    body = [{
+        "id": int(lead_id),
+        "_embedded": {
+            "tags": tags_payload
+        }
+    }]
+
+    try:
+        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
+        log_step("KOMMO_TAG_APLICAR", f"Status: {resp.status_code}", resp.text[:1000])
+    except Exception as e:
+        log_step("KOMMO_TAG_APLICAR", f"Erro ao aplicar tags: {str(e)}")
+
+
 def mover_lead_kommo(lead_id: str, status_id: int) -> None:
     if not lead_id or not status_id:
         return
@@ -502,6 +626,22 @@ def mover_lead_kommo(lead_id: str, status_id: int) -> None:
         log_step("KOMMO_MOVE", f"Status: {resp.status_code}", resp.text[:1000])
     except Exception as e:
         log_step("KOMMO_MOVE", f"Erro ao mover lead: {str(e)}")
+
+
+def definir_tags_por_resultado(data: Dict[str, Any]) -> List[str]:
+    status = data.get("status")
+    elegibilidade = data.get("elegibilidade")
+
+    if status == STATUS_AGUARDANDO_VIRADA_FOLHA:
+        return [TAG_AGUARDANDO_VIRADA]
+
+    if status == STATUS_AGUARDANDO_AUTORIZACAO:
+        return [TAG_AGUARDANDO_AUTORIZACAO]
+
+    if elegibilidade == "sim":
+        return [TAG_ELEGIVEL]
+
+    return [TAG_NAO_ELEGIVEL]
 
 
 # =========================
@@ -689,6 +829,10 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
             ultimo_response = resp
 
+            if resp.status_code == 400 and body_has_virada_folha(body):
+                log_step("VINCULOS_RETRY", "Virada de folha detectada", body)
+                return resp
+
             if resp.status_code == 400 and body_is_definitive_inelegible(body):
                 log_step("VINCULOS_RETRY", "Inelegibilidade definitiva detectada", body)
                 return resp
@@ -828,7 +972,8 @@ def processar_fluxo_com_vinculos_body(
     cpf: str,
     telefone: str,
     vinculos_body: Any,
-    lead_id: Optional[str]
+    lead_id: Optional[str],
+    nome: Optional[str]
 ) -> Dict[str, Any]:
     vinculos = extract_candidates_vinculos(vinculos_body)
     vinculo = pick_vinculo(vinculos)
@@ -836,9 +981,10 @@ def processar_fluxo_com_vinculos_body(
     if not vinculo:
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Nenhum vínculo encontrado"
+            mensagem_tecnica="Nenhum vínculo encontrado",
+            nome=nome
         )
 
     matricula = str(
@@ -859,9 +1005,10 @@ def processar_fluxo_com_vinculos_body(
     if not matricula or not cnpj:
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Não foi possível extrair matrícula/cnpj"
+            mensagem_tecnica="Não foi possível extrair matrícula/cnpj",
+            nome=nome
         )
 
     margem = consultar_margem(headers, cpf, matricula, cnpj)
@@ -873,18 +1020,20 @@ def processar_fluxo_com_vinculos_body(
     ):
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica=f"Erro na margem: {margem}"
+            mensagem_tecnica=f"Erro na margem: {margem}",
+            nome=nome
         )
 
     valor_parcela = extract_valor_parcela(margem)
     if valor_parcela <= 0:
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Margem zerada"
+            mensagem_tecnica="Margem zerada",
+            nome=nome
         )
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
@@ -892,9 +1041,10 @@ def processar_fluxo_com_vinculos_body(
     if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica=f"Erro na simulação: {simulacao}"
+            mensagem_tecnica=f"Erro na simulação: {simulacao}",
+            nome=nome
         )
 
     valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
@@ -902,18 +1052,20 @@ def processar_fluxo_com_vinculos_body(
     if valor_disponivel <= 0 or parcela <= 0:
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Oferta inválida"
+            mensagem_tecnica="Oferta inválida",
+            nome=nome
         )
 
     return build_response(
         lead_id=lead_id,
-        status="sucesso",
+        status=STATUS_SUCESSO,
         elegibilidade="sim",
         valor_disponivel=valor_disponivel,
         parcela=parcela,
-        mensagem_tecnica="Consulta concluída com sucesso"
+        mensagem_tecnica="Consulta concluída com sucesso",
+        nome=nome
     )
 
 
@@ -934,7 +1086,6 @@ def tentar_fluxo_completo(
 
     log_step("FLUXO", f"Início do fluxo | lead_id={lead_id} | cpf={cpf} | telefone={telefone}")
 
-    # Se já veio com autorização, prioriza esse fluxo sem mexer no que já está funcionando
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         log_step("FLUXO", "Resultado assinatura com autorizacao_id", assinatura)
@@ -942,10 +1093,11 @@ def tentar_fluxo_completo(
         if not assinatura.get("ok"):
             return build_response(
                 lead_id=lead_id,
-                status="aguardando_autorizacao",
+                status=STATUS_AGUARDANDO_AUTORIZACAO,
                 autorizacao_id=autorizacao_id,
                 link_autorizacao=None,
-                mensagem_tecnica="Falha ao assinar termo com autorizacao_id recebido"
+                mensagem_tecnica="Falha ao assinar termo com autorizacao_id recebido",
+                nome=nome
             )
 
         time.sleep(WAIT_AFTER_AUTO_SIGN)
@@ -955,31 +1107,44 @@ def tentar_fluxo_completo(
             body = safe_json(resp_vinc)
 
             if resp_vinc.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body, lead_id)
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body, lead_id, nome)
 
             if resp_vinc.status_code == 429:
                 return build_response(
                     lead_id=lead_id,
-                    status="sucesso",
+                    status=STATUS_SUCESSO,
                     elegibilidade="nao",
-                    mensagem_tecnica="Rate limit em vínculos"
+                    mensagem_tecnica="Rate limit em vínculos",
+                    nome=nome
+                )
+
+            if resp_vinc.status_code == 400 and body_has_virada_folha(body):
+                return build_response(
+                    lead_id=lead_id,
+                    status=STATUS_AGUARDANDO_VIRADA_FOLHA,
+                    elegibilidade=None,
+                    autorizacao_id=autorizacao_id,
+                    mensagem_tecnica="Virada de folha",
+                    nome=nome
                 )
 
             if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body):
                 return build_response(
                     lead_id=lead_id,
-                    status="sucesso",
+                    status=STATUS_SUCESSO,
                     elegibilidade="nao",
-                    mensagem_tecnica=f"Inelegibilidade definitiva: {body}"
+                    mensagem_tecnica=f"Inelegibilidade definitiva: {body}",
+                    nome=nome
                 )
 
             if resp_vinc.status_code == 400 and body_has_missing_authorization(body):
                 return build_response(
                     lead_id=lead_id,
-                    status="aguardando_autorizacao",
+                    status=STATUS_AGUARDANDO_AUTORIZACAO,
                     autorizacao_id=autorizacao_id,
                     link_autorizacao=None,
-                    mensagem_tecnica="Autorização ainda não refletiu após assinatura"
+                    mensagem_tecnica="Autorização ainda não refletiu após assinatura",
+                    nome=nome
                 )
 
         except Exception as e:
@@ -987,42 +1152,52 @@ def tentar_fluxo_completo(
 
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Falha após assinatura com autorizacao_id"
+            mensagem_tecnica="Falha após assinatura com autorizacao_id",
+            nome=nome
         )
 
-    # Primeira tentativa direta de vínculos
     try:
         resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
         body_vinc = safe_json(resp_vinc)
 
         if resp_vinc.status_code == 200:
-            return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id)
+            return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id, nome)
 
         if resp_vinc.status_code == 429:
             return build_response(
                 lead_id=lead_id,
-                status="sucesso",
+                status=STATUS_SUCESSO,
                 elegibilidade="nao",
-                mensagem_tecnica="Rate limit em vínculos"
+                mensagem_tecnica="Rate limit em vínculos",
+                nome=nome
+            )
+
+        if resp_vinc.status_code == 400 and body_has_virada_folha(body_vinc):
+            return build_response(
+                lead_id=lead_id,
+                status=STATUS_AGUARDANDO_VIRADA_FOLHA,
+                mensagem_tecnica="Virada de folha",
+                nome=nome
             )
 
         if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body_vinc):
             return build_response(
                 lead_id=lead_id,
-                status="sucesso",
+                status=STATUS_SUCESSO,
                 elegibilidade="nao",
-                mensagem_tecnica=f"Inelegibilidade definitiva: {body_vinc}"
+                mensagem_tecnica=f"Inelegibilidade definitiva: {body_vinc}",
+                nome=nome
             )
 
-        # Só gera termo quando a falta de autorização for realmente o caso
         if not (resp_vinc.status_code == 400 and body_has_missing_authorization(body_vinc)):
             return build_response(
                 lead_id=lead_id,
-                status="sucesso",
+                status=STATUS_SUCESSO,
                 elegibilidade="nao",
-                mensagem_tecnica=f"Resposta inicial fora do fluxo esperado: {body_vinc}"
+                mensagem_tecnica=f"Resposta inicial fora do fluxo esperado: {body_vinc}",
+                nome=nome
             )
 
         log_step("FLUXO", "Entrando em geração de termo por falta de autorização", body_vinc)
@@ -1031,12 +1206,12 @@ def tentar_fluxo_completo(
         log_step("VINCULOS_INICIAL", f"erro antes de gerar termo: {str(e)}")
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica=f"Erro inicial vínculos: {str(e)}"
+            mensagem_tecnica=f"Erro inicial vínculos: {str(e)}",
+            nome=nome
         )
 
-    # Geração de termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -1044,21 +1219,22 @@ def tentar_fluxo_completo(
     if termo.get("erro_telefone_reutilizado"):
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
-            mensagem_tecnica="Telefone já utilizado em outro termo"
+            mensagem_tecnica="Telefone já utilizado em outro termo",
+            nome=nome
         )
 
     if not novo_id:
         return build_response(
             lead_id=lead_id,
-            status="sucesso",
+            status=STATUS_SUCESSO,
             elegibilidade="nao",
             link_autorizacao=link,
-            mensagem_tecnica=f"Não foi possível gerar autorizacao_id: {termo}"
+            mensagem_tecnica=f"Não foi possível gerar autorizacao_id: {termo}",
+            nome=nome
         )
 
-    # Autoassinatura
     assinatura_auto = assinar_termo(headers, novo_id)
     log_step("ASSINATURA_AUTO", "Resultado", assinatura_auto)
 
@@ -1071,26 +1247,38 @@ def tentar_fluxo_completo(
             body_vinc_2 = safe_json(resp_vinc_2)
 
             if resp_vinc_2.status_code == 200:
-                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2, lead_id)
+                return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2, lead_id, nome)
 
             if resp_vinc_2.status_code == 429:
                 return build_response(
                     lead_id=lead_id,
-                    status="sucesso",
+                    status=STATUS_SUCESSO,
                     elegibilidade="nao",
                     autorizacao_id=novo_id,
                     link_autorizacao=link,
-                    mensagem_tecnica="Rate limit em vínculos após autoassinatura"
+                    mensagem_tecnica="Rate limit em vínculos após autoassinatura",
+                    nome=nome
+                )
+
+            if resp_vinc_2.status_code == 400 and body_has_virada_folha(body_vinc_2):
+                return build_response(
+                    lead_id=lead_id,
+                    status=STATUS_AGUARDANDO_VIRADA_FOLHA,
+                    autorizacao_id=novo_id,
+                    link_autorizacao=link,
+                    mensagem_tecnica="Virada de folha",
+                    nome=nome
                 )
 
             if resp_vinc_2.status_code == 400 and body_is_definitive_inelegible(body_vinc_2):
                 return build_response(
                     lead_id=lead_id,
-                    status="sucesso",
+                    status=STATUS_SUCESSO,
                     elegibilidade="nao",
                     autorizacao_id=novo_id,
                     link_autorizacao=link,
-                    mensagem_tecnica=f"Inelegibilidade definitiva após autoassinatura: {body_vinc_2}"
+                    mensagem_tecnica=f"Inelegibilidade definitiva após autoassinatura: {body_vinc_2}",
+                    nome=nome
                 )
 
             if resp_vinc_2.status_code == 400 and body_has_missing_authorization(body_vinc_2):
@@ -1101,35 +1289,48 @@ def tentar_fluxo_completo(
                 body_vinc_3 = safe_json(resp_vinc_3)
 
                 if resp_vinc_3.status_code == 200:
-                    return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_3, lead_id)
+                    return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_3, lead_id, nome)
 
                 if resp_vinc_3.status_code == 429:
                     return build_response(
                         lead_id=lead_id,
-                        status="sucesso",
+                        status=STATUS_SUCESSO,
                         elegibilidade="nao",
                         autorizacao_id=novo_id,
                         link_autorizacao=link,
-                        mensagem_tecnica="Rate limit no retry final"
+                        mensagem_tecnica="Rate limit no retry final",
+                        nome=nome
+                    )
+
+                if resp_vinc_3.status_code == 400 and body_has_virada_folha(body_vinc_3):
+                    return build_response(
+                        lead_id=lead_id,
+                        status=STATUS_AGUARDANDO_VIRADA_FOLHA,
+                        autorizacao_id=novo_id,
+                        link_autorizacao=link,
+                        mensagem_tecnica="Virada de folha",
+                        nome=nome
                     )
 
                 if resp_vinc_3.status_code == 400 and body_is_definitive_inelegible(body_vinc_3):
                     return build_response(
                         lead_id=lead_id,
-                        status="sucesso",
+                        status=STATUS_SUCESSO,
                         elegibilidade="nao",
                         autorizacao_id=novo_id,
                         link_autorizacao=link,
-                        mensagem_tecnica=f"Inelegibilidade definitiva no retry final: {body_vinc_3}"
+                        mensagem_tecnica=f"Inelegibilidade definitiva no retry final: {body_vinc_3}",
+                        nome=nome
                     )
 
                 if resp_vinc_3.status_code == 400 and body_has_missing_authorization(body_vinc_3):
                     return build_response(
                         lead_id=lead_id,
-                        status="aguardando_autorizacao",
+                        status=STATUS_AGUARDANDO_AUTORIZACAO,
                         autorizacao_id=novo_id,
                         link_autorizacao=link,
-                        mensagem_tecnica=f"Mesmo após retry final, autorização ainda não refletiu: {body_vinc_3}"
+                        mensagem_tecnica=f"Mesmo após retry final, autorização ainda não refletiu: {body_vinc_3}",
+                        nome=nome
                     )
 
         except Exception as e:
@@ -1137,10 +1338,11 @@ def tentar_fluxo_completo(
 
     return build_response(
         lead_id=lead_id,
-        status="aguardando_autorizacao",
+        status=STATUS_AGUARDANDO_AUTORIZACAO,
         autorizacao_id=novo_id,
         link_autorizacao=link,
-        mensagem_tecnica="Fluxo terminou aguardando autorização"
+        mensagem_tecnica="Fluxo terminou aguardando autorização",
+        nome=nome
     )
 
 
@@ -1153,11 +1355,15 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
     parcela = data.get("parcela")
     autorizacao_id = data.get("autorizacao_id")
     link_autorizacao = data.get("link_autorizacao")
-    mensagem_tecnica = data.get("mensagem_tecnica") or "-"
+    mensagem_tecnica = limpar_mensagem_tecnica(data.get("mensagem_tecnica"))
+    status = data.get("status")
 
-    if data.get("status") == "aguardando_autorizacao":
+    primeiro_nome = first_name(nome) or "cliente"
+
+    if status == STATUS_AGUARDANDO_AUTORIZACAO:
         return (
             "📌 RETORNO API PRESENÇA\n\n"
+            f"Olá, {primeiro_nome} 🙂\n\n"
             f"Lead ID: {lead_id}\n"
             f"Status: AGUARDANDO AUTORIZAÇÃO\n"
             f"Nome: {nome}\n"
@@ -1165,30 +1371,45 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
             f"Telefone: {telefone}\n\n"
             f"Autorização ID: {autorizacao_id or '-'}\n"
             f"Link autorização: {link_autorizacao or '-'}\n"
-            f"Detalhe técnico: {mensagem_tecnica}"
+            f"Motivo técnico: {mensagem_tecnica}"
+        )
+
+    if status == STATUS_AGUARDANDO_VIRADA_FOLHA:
+        return (
+            "📆 RETORNO API PRESENÇA\n\n"
+            f"Olá, {primeiro_nome} 🙂\n\n"
+            f"Lead ID: {lead_id}\n"
+            f"Status: AGUARDANDO VIRADA DE FOLHA\n"
+            f"Nome: {nome}\n"
+            f"CPF: {cpf}\n"
+            f"Telefone: {telefone}\n\n"
+            "Observação: esse bloqueio costuma acontecer em poucos dias do mês.\n"
+            f"Motivo técnico: {mensagem_tecnica}"
         )
 
     if elegibilidade == "sim":
         return (
             "✅ RETORNO API PRESENÇA\n\n"
+            f"Olá, {primeiro_nome} 🙂\n\n"
             f"Lead ID: {lead_id}\n"
             f"Status: ELEGÍVEL\n"
             f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
             f"Telefone: {telefone}\n\n"
-            f"Valor disponível: {format_brl(valor_disponivel)}\n"
-            f"Parcela: {format_brl(parcela)}\n"
-            f"Detalhe técnico: {mensagem_tecnica}"
+            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
+            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
+            f"Motivo técnico: {mensagem_tecnica}"
         )
 
     return (
         "⚠️ RETORNO API PRESENÇA\n\n"
+        f"Olá, {primeiro_nome} 🙂\n\n"
         f"Lead ID: {lead_id}\n"
-        f"Status: INELEGÍVEL\n"
+        f"Status: NÃO ELEGÍVEL\n"
         f"Nome: {nome}\n"
         f"CPF: {cpf}\n"
-        f"Telefone: {telefone}\n"
-        f"Detalhe técnico: {mensagem_tecnica}"
+        f"Telefone: {telefone}\n\n"
+        f"Motivo técnico: {mensagem_tecnica}"
     )
 
 
@@ -1217,9 +1438,10 @@ def consulta(
                 status_code=200,
                 content=build_response(
                     lead_id=lead_id,
-                    status="sucesso",
+                    status=STATUS_SUCESSO,
                     elegibilidade="nao",
-                    mensagem_tecnica="CPF inválido"
+                    mensagem_tecnica="CPF inválido",
+                    nome=nome
                 )
             )
 
@@ -1239,9 +1461,10 @@ def consulta(
             status_code=200,
             content=build_response(
                 lead_id=lead_id,
-                status="sucesso",
+                status=STATUS_SUCESSO,
                 elegibilidade="nao",
-                mensagem_tecnica=str(e)
+                mensagem_tecnica=str(e),
+                nome=nome
             )
         )
 
@@ -1286,6 +1509,7 @@ async def kommo_webhook(request: Request):
                 "Não foi possível consultar: faltam dados obrigatórios no lead (CPF, nome ou telefone)."
             )
             mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
+            aplicar_tags_kommo(lead_id, [TAG_NAO_ELEGIVEL])
             return {"status": "ok", "mensagem": "dados_incompletos"}
 
         data = tentar_fluxo_completo(
@@ -1308,6 +1532,9 @@ async def kommo_webhook(request: Request):
 
         criar_nota_kommo(lead_id, texto_nota)
         mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
+
+        tags = definir_tags_por_resultado(data)
+        aplicar_tags_kommo(lead_id, tags)
 
         return {"status": "ok", "resultado": data}
 
