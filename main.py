@@ -81,7 +81,7 @@ def normalize_phone(value: Any) -> str:
     - remove prefixo 55 se houver
     - se tiver 10 dígitos: insere 9 após o DDD
     - se tiver 11 dígitos: ok
-    - se tiver mais de 11: tenta aproveitar os últimos 11
+    - se tiver mais de 11: usa os últimos 11
     - se tiver estrutura parcial com DDD + 8 dígitos: insere 9 no meio
     """
     original = str(value or "")
@@ -370,16 +370,25 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
 
 def preparar_texto_para_campo_kommo(texto: str) -> str:
     """
-    Prepara a mensagem para ser salva em campo do Kommo.
-    Mantém emojis simples, remove quebras de linha e espaços duplicados.
+    Mensagem SEMPRE em uma linha só para o bot do Kommo.
+    Mantém emojis simples e remove qualquer quebra / caractere invisível.
     """
     if not texto:
         return ""
 
     texto = str(texto)
-    texto = texto.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    texto = re.sub(r"\s+", " ", texto).strip()
 
+    texto = (
+        texto.replace("\r\n", " ")
+             .replace("\n", " ")
+             .replace("\r", " ")
+             .replace("\t", " ")
+             .replace("\u00a0", " ")
+             .replace("\u200b", "")
+             .replace("\ufeff", "")
+    )
+
+    texto = re.sub(r"\s+", " ", texto).strip()
     return texto
 
 
@@ -433,6 +442,8 @@ def build_response(
             "No momento não encontramos uma condição disponível para essa consulta. "
             "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
         )
+
+    mensagem_cliente = preparar_texto_para_campo_kommo(mensagem_cliente)
 
     return {
         "lead_id": lead_id,
@@ -1557,12 +1568,7 @@ async def kommo_webhook(request: Request):
         )
 
         criar_nota_kommo(lead_id, texto_nota)
-
-        atualizar_mensagem_api_kommo(
-            lead_id=lead_id,
-            texto=data.get("mensagem_cliente", "")
-        )
-
+        atualizar_mensagem_api_kommo(lead_id=lead_id, texto=data.get("mensagem_cliente", ""))
         mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
 
         tags = definir_tags_por_resultado(data)
