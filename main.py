@@ -30,6 +30,7 @@ SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "12"))
 SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
 
 CPF_FIELD_ID = 974096
+KOMMO_MSG_FIELD_ID = int(os.getenv("KOMMO_MSG_FIELD_ID", "994693"))
 
 TAG_ELEGIVEL = os.getenv("KOMMO_TAG_ELEGIVEL", "Elegível CLT")
 TAG_NAO_ELEGIVEL = os.getenv("KOMMO_TAG_NAO_ELEGIVEL", "Não Elegível CLT")
@@ -382,8 +383,10 @@ def build_response(
     saudacao_nome = f"{primeiro_nome}, " if primeiro_nome else ""
 
     mensagem_cliente = ""
+    tipo_mensagem = ""
 
     if status == STATUS_AGUARDANDO_AUTORIZACAO:
+        tipo_mensagem = "aguardando_autorizacao"
         mensagem_cliente = (
             f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "Para continuar sua consulta, preciso que você conclua esta autorização rápida:\n\n"
@@ -392,6 +395,7 @@ def build_response(
         )
 
     elif status == STATUS_AGUARDANDO_VIRADA_FOLHA:
+        tipo_mensagem = "aguardando_virada_folha"
         mensagem_cliente = (
             f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "Sua consulta está em período de virada de folha.\n\n"
@@ -400,6 +404,7 @@ def build_response(
         )
 
     elif elegibilidade == "sim":
+        tipo_mensagem = "elegivel"
         mensagem_cliente = (
             f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "Temos uma boa notícia por aqui.\n\n"
@@ -409,6 +414,7 @@ def build_response(
         )
 
     elif elegibilidade == "nao":
+        tipo_mensagem = "nao_elegivel"
         mensagem_cliente = (
             f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
             "No momento não encontramos uma condição disponível para essa consulta.\n\n"
@@ -424,6 +430,7 @@ def build_response(
         "autorizacao_id": autorizacao_id,
         "link_autorizacao": link_autorizacao,
         "mensagem_cliente": mensagem_cliente,
+        "tipo_mensagem": tipo_mensagem,
         "mensagem_tecnica": mensagem_tecnica
     }
 
@@ -547,37 +554,37 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
         log_step("KOMMO_NOTA", f"Erro ao criar nota: {str(e)}")
 
 
-def buscar_ou_criar_tag_kommo(nome_tag: str) -> Optional[int]:
-    if not nome_tag:
-        return None
+def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
+    """
+    Salva a mensagem pronta da API no campo personalizado do lead.
+    Aqui usaremos o campo Interesse (field_id 994693).
+    """
+    if not lead_id or not texto:
+        return
+
+    if not KOMMO_MSG_FIELD_ID:
+        log_step("KOMMO_CAMPO_MSG", "KOMMO_MSG_FIELD_ID não configurado")
+        return
+
+    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+
+    body = [
+        {
+            "id": int(lead_id),
+            "custom_fields_values": [
+                {
+                    "field_id": KOMMO_MSG_FIELD_ID,
+                    "values": [{"value": str(texto)}]
+                }
+            ]
+        }
+    ]
 
     try:
-        url_busca = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/tags"
-        resp = requests.get(url_busca, headers=kommo_headers(), params={"query": nome_tag}, timeout=30)
-        log_step("KOMMO_TAG", f"Busca tag status: {resp.status_code}", resp.text[:1000])
-
-        if resp.ok:
-            data = safe_json(resp)
-            tags = data.get("_embedded", {}).get("tags", []) if isinstance(data, dict) else []
-            for tag in tags:
-                if str(tag.get("name", "")).strip().lower() == nome_tag.strip().lower():
-                    return int(tag["id"])
-
-        url_create = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/tags"
-        payload = [{"name": nome_tag}]
-        resp_create = requests.post(url_create, headers=kommo_headers(), json=payload, timeout=30)
-        log_step("KOMMO_TAG", f"Criação tag status: {resp_create.status_code}", resp_create.text[:1000])
-
-        if resp_create.ok:
-            data_create = safe_json(resp_create)
-            embedded = data_create.get("_embedded", {}).get("tags", []) if isinstance(data_create, dict) else []
-            if embedded:
-                return int(embedded[0]["id"])
-
+        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
+        log_step("KOMMO_CAMPO_MSG", f"Status: {resp.status_code}", resp.text[:1000])
     except Exception as e:
-        log_step("KOMMO_TAG", f"Erro ao buscar/criar tag: {str(e)}")
-
-    return None
+        log_step("KOMMO_CAMPO_MSG", f"Erro ao atualizar mensagem da API: {str(e)}")
 
 
 def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
@@ -1508,6 +1515,10 @@ async def kommo_webhook(request: Request):
                 lead_id,
                 "Não foi possível consultar: faltam dados obrigatórios no lead (CPF, nome ou telefone)."
             )
+            atualizar_mensagem_api_kommo(
+                lead_id=lead_id,
+                texto="Olá 🙂 No momento não consegui concluir sua consulta porque faltam alguns dados. Me envie por favor seu CPF e telefone atualizados."
+            )
             mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
             aplicar_tags_kommo(lead_id, [TAG_NAO_ELEGIVEL])
             return {"status": "ok", "mensagem": "dados_incompletos"}
@@ -1531,6 +1542,13 @@ async def kommo_webhook(request: Request):
         )
 
         criar_nota_kommo(lead_id, texto_nota)
+
+        # grava a mensagem pronta da API no campo Interesse (field_id 994693)
+        atualizar_mensagem_api_kommo(
+            lead_id=lead_id,
+            texto=data.get("mensagem_cliente", "")
+        )
+
         mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
 
         tags = definir_tags_por_resultado(data)
