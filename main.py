@@ -371,24 +371,12 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
 def preparar_texto_para_campo_kommo(texto: str) -> str:
     """
     Prepara a mensagem para ser salva em campo do Kommo.
-    Remove emojis simples, quebras de linha e espaços duplicados.
-    Deixa tudo em uma linha só para o bot enviar inteiro.
+    Mantém emojis simples, remove quebras de linha e espaços duplicados.
     """
     if not texto:
         return ""
 
     texto = str(texto)
-
-    texto = (
-        texto.replace("🙂", "")
-             .replace("💰", "")
-             .replace("📉", "")
-             .replace("📌", "")
-             .replace("✅", "")
-             .replace("⚠️", "")
-             .replace("📆", "")
-    )
-
     texto = texto.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     texto = re.sub(r"\s+", " ", texto).strip()
 
@@ -415,36 +403,34 @@ def build_response(
     if status == STATUS_AGUARDANDO_AUTORIZACAO:
         tipo_mensagem = "aguardando_autorizacao"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Para continuar sua consulta, preciso que você conclua esta autorização rápida:\n\n"
-            f"{link_autorizacao or ''}\n\n"
-            "Assim que finalizar, me avise aqui para eu seguir com a análise."
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            f"Para continuar sua consulta, preciso que você conclua esta autorização rápida: {link_autorizacao or ''} "
+            "Assim que finalizar, me avise por aqui para eu seguir com a análise."
         )
 
     elif status == STATUS_AGUARDANDO_VIRADA_FOLHA:
         tipo_mensagem = "aguardando_virada_folha"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Sua consulta está em período de virada de folha.\n\n"
-            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês.\n\n"
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            "Sua consulta está em período de virada de folha. "
+            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês. "
             "📌 Assim que a base normalizar, posso consultar novamente para você."
         )
 
     elif elegibilidade == "sim":
         tipo_mensagem = "elegivel"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Temos uma boa notícia por aqui.\n\n"
-            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
-            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
-            "Se quiser, sigo com os próximos passos para você."
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            f"Temos uma boa notícia: você tem aproximadamente {format_brl(valor_disponivel)} disponível, "
+            f"com parcela estimada de {format_brl(parcela)}. "
+            "✅ Se quiser, sigo com os próximos passos para você."
         )
 
     elif elegibilidade == "nao":
         tipo_mensagem = "nao_elegivel"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "No momento não encontramos uma condição disponível para essa consulta.\n\n"
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            "No momento não encontramos uma condição disponível para essa consulta. "
             "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
         )
 
@@ -582,11 +568,6 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
 
 
 def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
-    """
-    Salva a mensagem pronta da API no campo personalizado do lead.
-    Aqui usaremos o campo Interesse (field_id 994693), mas em formato limpo
-    e sem quebra de linha para o bot disparar inteira.
-    """
     if not lead_id or not texto:
         return
 
@@ -597,7 +578,6 @@ def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
     texto_limpo = preparar_texto_para_campo_kommo(texto)
 
     url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
-
     body = [
         {
             "id": int(lead_id),
@@ -622,27 +602,40 @@ def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
     if not lead_id or not nomes_tags:
         return
 
-    tags_payload = []
-    for nome_tag in nomes_tags:
-        nome_tag = str(nome_tag or "").strip()
-        if not nome_tag:
-            continue
-        tags_payload.append({"name": nome_tag})
-
-    if not tags_payload:
-        return
-
-    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
-    body = [{
-        "id": int(lead_id),
-        "_embedded": {
-            "tags": tags_payload
-        }
-    }]
-
     try:
-        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
-        log_step("KOMMO_TAG_APLICAR", f"Status: {resp.status_code}", resp.text[:1000])
+        url_get = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
+        resp_get = requests.get(url_get, headers=kommo_headers(), timeout=30)
+        log_step("KOMMO_TAG_GET", f"Status: {resp_get.status_code}", resp_get.text[:1000])
+
+        tags_existentes = []
+
+        if resp_get.ok:
+            data = safe_json(resp_get)
+            tags_atuais = data.get("_embedded", {}).get("tags", []) if isinstance(data, dict) else []
+            for tag in tags_atuais:
+                nome_tag = str(tag.get("name", "")).strip()
+                if nome_tag:
+                    tags_existentes.append(nome_tag)
+
+        todas_tags = tags_existentes[:]
+        for nome_tag in nomes_tags:
+            nome_tag = str(nome_tag or "").strip()
+            if nome_tag and nome_tag not in todas_tags:
+                todas_tags.append(nome_tag)
+
+        tags_payload = [{"name": tag} for tag in todas_tags]
+
+        url_patch = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+        body = [{
+            "id": int(lead_id),
+            "_embedded": {
+                "tags": tags_payload
+            }
+        }]
+
+        resp_patch = requests.patch(url_patch, headers=kommo_headers(), json=body, timeout=30)
+        log_step("KOMMO_TAG_APLICAR", f"Status: {resp_patch.status_code}", resp_patch.text[:1000])
+
     except Exception as e:
         log_step("KOMMO_TAG_APLICAR", f"Erro ao aplicar tags: {str(e)}")
 
@@ -1401,52 +1394,43 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
     if status == STATUS_AGUARDANDO_AUTORIZACAO:
         return (
             "📌 RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: AGUARDANDO AUTORIZAÇÃO\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
+            f"Telefone: {telefone}\n"
             f"Autorização ID: {autorizacao_id or '-'}\n"
-            f"Link autorização: {link_autorizacao or '-'}\n"
+            f"Link: {link_autorizacao or '-'}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     if status == STATUS_AGUARDANDO_VIRADA_FOLHA:
         return (
             "📆 RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: AGUARDANDO VIRADA DE FOLHA\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
-            "Observação: esse bloqueio costuma acontecer em poucos dias do mês.\n"
+            f"Telefone: {telefone}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     if elegibilidade == "sim":
         return (
             "✅ RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: ELEGÍVEL\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
-            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
-            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
+            f"Telefone: {telefone}\n"
+            f"Valor disponível: {format_brl(valor_disponivel)}\n"
+            f"Parcela estimada: {format_brl(parcela)}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     return (
         "⚠️ RETORNO API PRESENÇA\n\n"
-        f"Olá, {primeiro_nome} 🙂\n\n"
-        f"Lead ID: {lead_id}\n"
+        f"Cliente: {primeiro_nome}\n"
         f"Status: NÃO ELEGÍVEL\n"
-        f"Nome: {nome}\n"
         f"CPF: {cpf}\n"
-        f"Telefone: {telefone}\n\n"
+        f"Telefone: {telefone}\n"
         f"Motivo técnico: {mensagem_tecnica}"
     )
 
@@ -1574,7 +1558,6 @@ async def kommo_webhook(request: Request):
 
         criar_nota_kommo(lead_id, texto_nota)
 
-        # grava a mensagem pronta da API no campo Interesse (field_id 994693), sem quebra de linha
         atualizar_mensagem_api_kommo(
             lead_id=lead_id,
             texto=data.get("mensagem_cliente", "")
