@@ -35,6 +35,15 @@ _LAST_CALL_TS = 0.0
 
 
 # =========================
+# LOG
+# =========================
+def log_step(step: str, message: str, data: Any = None) -> None:
+    print(f"[{step}] {message}", flush=True)
+    if data is not None:
+        print(f"[{step}] DATA: {data}", flush=True)
+
+
+# =========================
 # HELPERS
 # =========================
 def throttle() -> None:
@@ -152,7 +161,7 @@ def body_has_phone_already_used(body: Any) -> bool:
 
 def body_has_cpf_not_found(body: Any) -> bool:
     text = body_text(body)
-    return "cpf não encontrado na base" in text or "cpf nao encontrado na base"
+    return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
 
 
 def body_has_credito_trabalhador_competencia(body: Any) -> bool:
@@ -255,7 +264,8 @@ def build_response(
     valor_disponivel: Optional[float] = None,
     parcela: Optional[float] = None,
     autorizacao_id: Optional[str] = None,
-    link_autorizacao: Optional[str] = None
+    link_autorizacao: Optional[str] = None,
+    mensagem_tecnica: Optional[str] = None
 ) -> Dict[str, Any]:
     mensagem_cliente = ""
 
@@ -287,7 +297,8 @@ def build_response(
         "parcela": parcela,
         "autorizacao_id": autorizacao_id,
         "link_autorizacao": link_autorizacao,
-        "mensagem_cliente": mensagem_cliente
+        "mensagem_cliente": mensagem_cliente,
+        "mensagem_tecnica": mensagem_tecnica
     }
 
 
@@ -341,21 +352,19 @@ def extrair_lead_id_do_webhook(payload: Any, raw_body_text: str = "") -> Optiona
 
 def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
     if not KOMMO_TOKEN or not KOMMO_SUBDOMAIN:
-        print("[KOMMO] token ou subdomínio ausente", flush=True)
+        log_step("KOMMO", "token ou subdomínio ausente")
         return None
 
     lead_url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}?with=contacts"
-    print(f"[KOMMO] LEAD URL: {lead_url}", flush=True)
+    log_step("KOMMO", f"Buscando lead: {lead_url}")
 
     lead_resp = requests.get(lead_url, headers=kommo_headers(), timeout=30)
-    print(f"[KOMMO] LEAD STATUS: {lead_resp.status_code}", flush=True)
-    print(f"[KOMMO] LEAD BODY: {lead_resp.text[:2000]}", flush=True)
+    log_step("KOMMO", f"Lead status: {lead_resp.status_code}", lead_resp.text[:2000])
 
     if not lead_resp.ok:
         return None
 
     lead_data = safe_json(lead_resp)
-
     nome = lead_data.get("name", "")
 
     cpf = ""
@@ -372,11 +381,10 @@ def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
         contato_id = contatos[0].get("id")
         if contato_id:
             contato_url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/contacts/{contato_id}"
-            print(f"[KOMMO] CONTATO URL: {contato_url}", flush=True)
+            log_step("KOMMO", f"Buscando contato: {contato_url}")
 
             contato_resp = requests.get(contato_url, headers=kommo_headers(), timeout=30)
-            print(f"[KOMMO] CONTATO STATUS: {contato_resp.status_code}", flush=True)
-            print(f"[KOMMO] CONTATO BODY: {contato_resp.text[:2000]}", flush=True)
+            log_step("KOMMO", f"Contato status: {contato_resp.status_code}", contato_resp.text[:2000])
 
             if contato_resp.ok:
                 contato_data = safe_json(contato_resp)
@@ -408,10 +416,9 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
 
     try:
         resp = requests.post(url, headers=kommo_headers(), json=body, timeout=30)
-        print(f"[KOMMO] NOTA STATUS: {resp.status_code}", flush=True)
-        print(f"[KOMMO] NOTA BODY: {resp.text[:1000]}", flush=True)
+        log_step("KOMMO_NOTA", f"Status: {resp.status_code}", resp.text[:1000])
     except Exception as e:
-        print(f"[KOMMO] ERRO AO CRIAR NOTA: {str(e)}", flush=True)
+        log_step("KOMMO_NOTA", f"Erro ao criar nota: {str(e)}")
 
 
 def mover_lead_kommo(lead_id: str, status_id: int) -> None:
@@ -428,10 +435,9 @@ def mover_lead_kommo(lead_id: str, status_id: int) -> None:
 
     try:
         resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
-        print(f"[KOMMO] MOVE STATUS: {resp.status_code}", flush=True)
-        print(f"[KOMMO] MOVE BODY: {resp.text[:1000]}", flush=True)
+        log_step("KOMMO_MOVE", f"Status: {resp.status_code}", resp.text[:1000])
     except Exception as e:
-        print(f"[KOMMO] ERRO AO MOVER LEAD: {str(e)}", flush=True)
+        log_step("KOMMO_MOVE", f"Erro ao mover lead: {str(e)}")
 
 
 # =========================
@@ -444,9 +450,9 @@ def presenca_login_token() -> str:
     url = f"{BASE_URL}/login"
     payload = {"login": PRESENCA_LOGIN, "senha": PRESENCA_SENHA}
 
-    print(f"[LOGIN] URL: {url}", flush=True)
+    log_step("LOGIN", f"URL: {url}")
     resp = do_post(url, payload, timeout=(10, 30))
-    print(f"[LOGIN] STATUS: {resp.status_code}", flush=True)
+    log_step("LOGIN", f"STATUS: {resp.status_code}")
 
     if not resp.ok:
         raise RuntimeError(f"login_falhou_http_{resp.status_code}: {resp.text[:500]}")
@@ -468,14 +474,11 @@ def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> 
         "produtoId": 28
     }
 
-    print(f"[TERMO] URL: {url}", flush=True)
-    print(f"[TERMO] PAYLOAD: {payload}", flush=True)
-
+    log_step("TERMO", f"URL: {url}", payload)
     resp = do_post(url, payload, headers=headers, timeout=(10, 30))
     body = safe_json(resp)
 
-    print(f"[TERMO] STATUS: {resp.status_code}", flush=True)
-    print(f"[TERMO] BODY: {body}", flush=True)
+    log_step("TERMO", f"STATUS: {resp.status_code}", body)
 
     if resp.status_code >= 400 and body_has_phone_already_used(body):
         return {
@@ -533,39 +536,37 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         }
     }
 
-    print(f"[ASSINAR TERMO] URL: {url}", flush=True)
+    log_step("ASSINAR_TERMO", f"URL: {url}")
 
     try:
-        print(f"[ASSINAR TERMO] PAYLOAD USER: {payload_user}", flush=True)
+        log_step("ASSINAR_TERMO", "Tentando payload_user", payload_user)
         resp = do_put(url, payload_user, headers=headers_put, timeout=(10, 20))
         body = safe_json(resp)
-        print(f"[ASSINAR TERMO] STATUS USER: {resp.status_code}", flush=True)
-        print(f"[ASSINAR TERMO] BODY USER: {body}", flush=True)
+        log_step("ASSINAR_TERMO", f"STATUS USER: {resp.status_code}", body)
 
         if resp.status_code in (200, 201, 202, 204):
             return {"ok": True, "detalhe": body, "modo": "user_payload"}
     except requests.exceptions.ReadTimeout as e:
-        print(f"[ASSINAR TERMO] TIMEOUT USER: {str(e)}", flush=True)
+        log_step("ASSINAR_TERMO", f"TIMEOUT USER: {str(e)}")
         return {"ok": True, "detalhe": {"warning": "timeout_no_put_user_payload"}, "modo": "user_payload_timeout"}
     except Exception as e:
-        print(f"[ASSINAR TERMO] ERRO USER: {str(e)}", flush=True)
+        log_step("ASSINAR_TERMO", f"ERRO USER: {str(e)}")
 
     try:
-        print(f"[ASSINAR TERMO] PAYLOAD DOC: {payload_doc}", flush=True)
+        log_step("ASSINAR_TERMO", "Tentando payload_doc", payload_doc)
         resp2 = do_put(url, payload_doc, headers=headers_put, timeout=(10, 20))
         body2 = safe_json(resp2)
-        print(f"[ASSINAR TERMO] STATUS DOC: {resp2.status_code}", flush=True)
-        print(f"[ASSINAR TERMO] BODY DOC: {body2}", flush=True)
+        log_step("ASSINAR_TERMO", f"STATUS DOC: {resp2.status_code}", body2)
 
         if resp2.status_code in (200, 201, 202, 204):
             return {"ok": True, "detalhe": body2, "modo": "doc_payload"}
 
         return {"ok": False, "detalhe": body2, "modo": "doc_payload"}
     except requests.exceptions.ReadTimeout as e:
-        print(f"[ASSINAR TERMO] TIMEOUT DOC: {str(e)}", flush=True)
+        log_step("ASSINAR_TERMO", f"TIMEOUT DOC: {str(e)}")
         return {"ok": True, "detalhe": {"warning": "timeout_no_put_doc_payload"}, "modo": "doc_payload_timeout"}
     except Exception as e:
-        print(f"[ASSINAR TERMO] ERRO DOC: {str(e)}", flush=True)
+        log_step("ASSINAR_TERMO", f"ERRO DOC: {str(e)}")
         return {"ok": False, "detalhe": {"erro": str(e)}, "modo": "doc_payload_exception"}
 
 
@@ -573,12 +574,9 @@ def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-vinculos"
     payload = {"cpf": cpf}
 
-    print(f"[VINCULOS] URL: {url}", flush=True)
-    print(f"[VINCULOS] PAYLOAD: {payload}", flush=True)
-
+    log_step("VINCULOS", f"URL: {url}", payload)
     resp = do_post(url, payload, headers=headers, timeout=(10, 45))
-    print(f"[VINCULOS] STATUS: {resp.status_code}", flush=True)
-    print(f"[VINCULOS] BODY: {safe_json(resp)}", flush=True)
+    log_step("VINCULOS", f"STATUS: {resp.status_code}", safe_json(resp))
 
     return resp
 
@@ -589,6 +587,7 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
     for i in range(tentativas):
         try:
+            log_step("VINCULOS_RETRY", f"Tentativa {i+1}/{tentativas}")
             resp = consultar_vinculos(headers, cpf)
             body = safe_json(resp)
 
@@ -598,7 +597,7 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
             ultimo_response = resp
 
             if resp.status_code == 400 and body_is_definitive_inelegible(body):
-                print("[VINCULOS] erro definitivo de inelegibilidade -> retorno imediato", flush=True)
+                log_step("VINCULOS_RETRY", "Inelegibilidade definitiva detectada")
                 return resp
 
             if resp.status_code == 400 and body_has_missing_authorization(body):
@@ -609,14 +608,14 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
                 return resp
 
         except requests.exceptions.ReadTimeout as e:
-            print(f"[VINCULOS RETRY] timeout tentativa {i+1}: {str(e)}", flush=True)
+            log_step("VINCULOS_RETRY", f"timeout tentativa {i+1}: {str(e)}")
             ultimo_erro = e
         except Exception as e:
-            print(f"[VINCULOS RETRY] erro tentativa {i+1}: {str(e)}", flush=True)
+            log_step("VINCULOS_RETRY", f"erro tentativa {i+1}: {str(e)}")
             ultimo_erro = e
 
         if i < tentativas - 1:
-            print(f"[VINCULOS RETRY] aguardando {espera}s...", flush=True)
+            log_step("VINCULOS_RETRY", f"aguardando {espera}s...")
             time.sleep(espera)
 
     if ultimo_response is not None:
@@ -634,15 +633,13 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-margem"
     payload = {"cpf": cpf, "matricula": matricula, "cnpj": cnpj}
 
-    print(f"[MARGEM] URL: {url}", flush=True)
-    print(f"[MARGEM] PAYLOAD: {payload}", flush=True)
+    log_step("MARGEM", f"URL: {url}", payload)
 
     try:
         resp = do_post(url, payload, headers=headers, timeout=(10, 60))
         body = safe_json(resp)
 
-        print(f"[MARGEM] STATUS: {resp.status_code}", flush=True)
-        print(f"[MARGEM] BODY: {body}", flush=True)
+        log_step("MARGEM", f"STATUS: {resp.status_code}", body)
 
         if resp.status_code == 429:
             return {"erro_rate_limit": True, "mensagem": "Limite de requisições atingido no endpoint de margem"}
@@ -652,6 +649,8 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
 
     except requests.exceptions.ReadTimeout:
         return {"erro_timeout": True, "mensagem": "Timeout ao consultar margem"}
+    except Exception as e:
+        return {"erro_generico": True, "mensagem": str(e)}
 
 
 def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cnpj: str, margem: dict) -> Any:
@@ -710,14 +709,12 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
         "documentos": []
     }
 
-    print(f"[SIMULACAO] URL: {url}", flush=True)
-    print(f"[SIMULACAO] PAYLOAD: {payload}", flush=True)
+    log_step("SIMULACAO", f"URL: {url}", payload)
 
     resp = do_post(url, payload, headers=headers, timeout=(10, 60))
     body = safe_json(resp)
 
-    print(f"[SIMULACAO] STATUS: {resp.status_code}", flush=True)
-    print(f"[SIMULACAO] BODY: {body}", flush=True)
+    log_step("SIMULACAO", f"STATUS: {resp.status_code}", body)
 
     if resp.status_code == 400:
         return {
@@ -744,7 +741,12 @@ def processar_fluxo_com_vinculos_body(
     vinculo = pick_vinculo(vinculos)
 
     if not vinculo:
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Nenhum vínculo encontrado"
+        )
 
     matricula = str(
         vinculo.get("matricula")
@@ -762,33 +764,63 @@ def processar_fluxo_com_vinculos_body(
     )
 
     if not matricula or not cnpj:
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Não foi possível extrair matrícula/cnpj"
+        )
 
     margem = consultar_margem(headers, cpf, matricula, cnpj)
 
-    if isinstance(margem, dict) and (margem.get("erro_rate_limit") or margem.get("erro_timeout")):
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+    if isinstance(margem, dict) and (
+        margem.get("erro_rate_limit")
+        or margem.get("erro_timeout")
+        or margem.get("erro_generico")
+    ):
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica=f"Erro na margem: {margem}"
+        )
 
     valor_parcela = extract_valor_parcela(margem)
     if valor_parcela <= 0:
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Margem zerada"
+        )
 
     simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
 
     if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica=f"Erro na simulação: {simulacao}"
+        )
 
     valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
 
     if valor_disponivel <= 0 or parcela <= 0:
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Oferta inválida"
+        )
 
     return build_response(
         lead_id=lead_id,
         status="sucesso",
         elegibilidade="sim",
         valor_disponivel=valor_disponivel,
-        parcela=parcela
+        parcela=parcela,
+        mensagem_tecnica="Consulta concluída com sucesso"
     )
 
 
@@ -805,16 +837,19 @@ def tentar_fluxo_completo(
     token = presenca_login_token()
     headers = auth_headers(token)
 
+    log_step("FLUXO", f"Início do fluxo | lead_id={lead_id} | cpf={cpf}")
+
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
-        print(f"[ASSINATURA RESULTADO] {assinatura}", flush=True)
+        log_step("FLUXO", "Resultado assinatura com autorizacao_id", assinatura)
 
         if not assinatura.get("ok"):
             return build_response(
                 lead_id=lead_id,
                 status="aguardando_autorizacao",
                 autorizacao_id=autorizacao_id,
-                link_autorizacao=None
+                link_autorizacao=None,
+                mensagem_tecnica="Falha ao assinar termo com autorizacao_id recebido"
             )
 
         time.sleep(WAIT_AFTER_AUTO_SIGN)
@@ -827,23 +862,39 @@ def tentar_fluxo_completo(
                 return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body, lead_id)
 
             if resp_vinc.status_code == 429:
-                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                return build_response(
+                    lead_id=lead_id,
+                    status="sucesso",
+                    elegibilidade="nao",
+                    mensagem_tecnica="Rate limit em vínculos"
+                )
 
             if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body):
-                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                return build_response(
+                    lead_id=lead_id,
+                    status="sucesso",
+                    elegibilidade="nao",
+                    mensagem_tecnica=f"Inelegibilidade definitiva: {body}"
+                )
 
             if resp_vinc.status_code == 400 and body_has_missing_authorization(body):
                 return build_response(
                     lead_id=lead_id,
                     status="aguardando_autorizacao",
                     autorizacao_id=autorizacao_id,
-                    link_autorizacao=None
+                    link_autorizacao=None,
+                    mensagem_tecnica="Autorização ainda não refletiu após assinatura"
                 )
 
         except Exception as e:
-            print(f"[POS ASSINATURA] erro: {str(e)}", flush=True)
+            log_step("POS_ASSINATURA", f"erro: {str(e)}")
 
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Falha após assinatura com autorizacao_id"
+        )
 
     try:
         resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
@@ -853,30 +904,60 @@ def tentar_fluxo_completo(
             return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc, lead_id)
 
         if resp_vinc.status_code == 429:
-            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+            return build_response(
+                lead_id=lead_id,
+                status="sucesso",
+                elegibilidade="nao",
+                mensagem_tecnica="Rate limit em vínculos"
+            )
 
         if resp_vinc.status_code == 400 and body_is_definitive_inelegible(body_vinc):
-            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+            return build_response(
+                lead_id=lead_id,
+                status="sucesso",
+                elegibilidade="nao",
+                mensagem_tecnica=f"Inelegibilidade definitiva: {body_vinc}"
+            )
 
         if not (resp_vinc.status_code == 400 and body_has_missing_authorization(body_vinc)):
-            return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+            return build_response(
+                lead_id=lead_id,
+                status="sucesso",
+                elegibilidade="nao",
+                mensagem_tecnica=f"Resposta inicial fora do fluxo esperado: {body_vinc}"
+            )
 
     except Exception as e:
-        print(f"[VINCULOS INICIAL] erro antes de gerar termo: {str(e)}", flush=True)
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        log_step("VINCULOS_INICIAL", f"erro antes de gerar termo: {str(e)}")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica=f"Erro inicial vínculos: {str(e)}"
+        )
 
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
 
     if termo.get("erro_telefone_reutilizado"):
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica="Telefone já utilizado em outro termo"
+        )
 
     if not novo_id:
-        return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+        return build_response(
+            lead_id=lead_id,
+            status="sucesso",
+            elegibilidade="nao",
+            mensagem_tecnica=f"Não foi possível gerar autorizacao_id: {termo}"
+        )
 
     assinatura_auto = assinar_termo(headers, novo_id)
-    print(f"[ASSINATURA AUTO RESULTADO] {assinatura_auto}", flush=True)
+    log_step("ASSINATURA_AUTO", "Resultado", assinatura_auto)
 
     if assinatura_auto.get("ok"):
         try:
@@ -889,13 +970,23 @@ def tentar_fluxo_completo(
                 return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_2, lead_id)
 
             if resp_vinc_2.status_code == 429:
-                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                return build_response(
+                    lead_id=lead_id,
+                    status="sucesso",
+                    elegibilidade="nao",
+                    mensagem_tecnica="Rate limit em vínculos após autoassinatura"
+                )
 
             if resp_vinc_2.status_code == 400 and body_is_definitive_inelegible(body_vinc_2):
-                return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                return build_response(
+                    lead_id=lead_id,
+                    status="sucesso",
+                    elegibilidade="nao",
+                    mensagem_tecnica=f"Inelegibilidade definitiva após autoassinatura: {body_vinc_2}"
+                )
 
             if resp_vinc_2.status_code == 400 and body_has_missing_authorization(body_vinc_2):
-                print("[AUTOAUTORIZACAO] autorização ainda não refletiu, aguardando retry final...", flush=True)
+                log_step("AUTOAUTORIZACAO", "autorização ainda não refletiu, aguardando retry final...")
                 time.sleep(10)
 
                 resp_vinc_3 = tentar_vinculos_com_retry(headers, cpf, 2, 5)
@@ -905,19 +996,78 @@ def tentar_fluxo_completo(
                     return processar_fluxo_com_vinculos_body(headers, cpf, telefone, body_vinc_3, lead_id)
 
                 if resp_vinc_3.status_code == 429:
-                    return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                    return build_response(
+                        lead_id=lead_id,
+                        status="sucesso",
+                        elegibilidade="nao",
+                        mensagem_tecnica="Rate limit no retry final"
+                    )
 
                 if resp_vinc_3.status_code == 400 and body_is_definitive_inelegible(body_vinc_3):
-                    return build_response(lead_id=lead_id, status="sucesso", elegibilidade="nao")
+                    return build_response(
+                        lead_id=lead_id,
+                        status="sucesso",
+                        elegibilidade="nao",
+                        mensagem_tecnica=f"Inelegibilidade definitiva no retry final: {body_vinc_3}"
+                    )
 
         except Exception as e:
-            print(f"[AUTOAUTORIZACAO] erro após assinatura: {str(e)}", flush=True)
+            log_step("AUTOAUTORIZACAO", f"erro após assinatura: {str(e)}")
 
     return build_response(
         lead_id=lead_id,
         status="aguardando_autorizacao",
         autorizacao_id=novo_id,
-        link_autorizacao=link
+        link_autorizacao=link,
+        mensagem_tecnica="Fluxo terminou aguardando autorização"
+    )
+
+
+# =========================
+# FORMATAR NOTA KOMMO
+# =========================
+def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, data: Dict[str, Any]) -> str:
+    elegibilidade = data.get("elegibilidade")
+    valor_disponivel = data.get("valor_disponivel")
+    parcela = data.get("parcela")
+    autorizacao_id = data.get("autorizacao_id")
+    link_autorizacao = data.get("link_autorizacao")
+    mensagem_tecnica = data.get("mensagem_tecnica") or "-"
+
+    if data.get("status") == "aguardando_autorizacao":
+        return (
+            "📌 RETORNO API PRESENÇA\n\n"
+            f"Lead ID: {lead_id}\n"
+            f"Status: AGUARDANDO AUTORIZAÇÃO\n"
+            f"Nome: {nome}\n"
+            f"CPF: {cpf}\n"
+            f"Telefone: {telefone}\n\n"
+            f"Autorização ID: {autorizacao_id or '-'}\n"
+            f"Link autorização: {link_autorizacao or '-'}\n"
+            f"Detalhe técnico: {mensagem_tecnica}"
+        )
+
+    if elegibilidade == "sim":
+        return (
+            "✅ RETORNO API PRESENÇA\n\n"
+            f"Lead ID: {lead_id}\n"
+            f"Status: ELEGÍVEL\n"
+            f"Nome: {nome}\n"
+            f"CPF: {cpf}\n"
+            f"Telefone: {telefone}\n\n"
+            f"Valor disponível: {format_brl(valor_disponivel)}\n"
+            f"Parcela: {format_brl(parcela)}\n"
+            f"Detalhe técnico: {mensagem_tecnica}"
+        )
+
+    return (
+        "⚠️ RETORNO API PRESENÇA\n\n"
+        f"Lead ID: {lead_id}\n"
+        f"Status: INELEGÍVEL\n"
+        f"Nome: {nome}\n"
+        f"CPF: {cpf}\n"
+        f"Telefone: {telefone}\n"
+        f"Detalhe técnico: {mensagem_tecnica}"
     )
 
 
@@ -947,7 +1097,8 @@ def consulta(
                 content=build_response(
                     lead_id=lead_id,
                     status="sucesso",
-                    elegibilidade="nao"
+                    elegibilidade="nao",
+                    mensagem_tecnica="CPF inválido"
                 )
             )
 
@@ -962,13 +1113,14 @@ def consulta(
         return JSONResponse(status_code=200, content=resultado)
 
     except Exception as e:
-        print("[ERRO GERAL]", str(e), flush=True)
+        log_step("ERRO_GERAL", str(e))
         return JSONResponse(
             status_code=200,
             content=build_response(
                 lead_id=lead_id,
                 status="sucesso",
-                elegibilidade="nao"
+                elegibilidade="nao",
+                mensagem_tecnica=str(e)
             )
         )
 
@@ -978,7 +1130,7 @@ async def kommo_webhook(request: Request):
     try:
         raw_body = await request.body()
         raw_body_text = raw_body.decode("utf-8", errors="ignore")
-        print("[KOMMO RAW BODY]", raw_body_text, flush=True)
+        log_step("KOMMO_WEBHOOK", "RAW BODY", raw_body_text)
 
         payload = {}
         try:
@@ -986,16 +1138,16 @@ async def kommo_webhook(request: Request):
         except Exception:
             payload = {}
 
-        print("[KOMMO PAYLOAD]", payload, flush=True)
+        log_step("KOMMO_WEBHOOK", "PAYLOAD JSON", payload)
 
         lead_id = extrair_lead_id_do_webhook(payload, raw_body_text)
-        print("[KOMMO LEAD ID EXTRAIDO]", lead_id, flush=True)
+        log_step("KOMMO_WEBHOOK", f"LEAD ID EXTRAIDO: {lead_id}")
 
         if not lead_id:
             return {"status": "ok", "mensagem": "lead_id_nao_encontrado"}
 
         dados_lead = buscar_lead_kommo(lead_id)
-        print("[KOMMO DADOS LEAD]", dados_lead, flush=True)
+        log_step("KOMMO_WEBHOOK", "DADOS LEAD", dados_lead)
 
         if not dados_lead:
             criar_nota_kommo(lead_id, "Erro ao buscar os dados do lead no Kommo.")
@@ -1005,7 +1157,7 @@ async def kommo_webhook(request: Request):
         nome = str(dados_lead.get("nome") or "")
         telefone = normalize_phone(dados_lead.get("telefone"))
 
-        print(f"[KOMMO DADOS NORMALIZADOS] CPF={cpf} | NOME={nome} | TEL={telefone}", flush=True)
+        log_step("KOMMO_WEBHOOK", f"DADOS NORMALIZADOS | CPF={cpf} | NOME={nome} | TEL={telefone}")
 
         if not cpf or not nome or not telefone:
             criar_nota_kommo(
@@ -1015,64 +1167,24 @@ async def kommo_webhook(request: Request):
             mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
             return {"status": "ok", "mensagem": "dados_incompletos"}
 
-        response = requests.get(
-            "https://kommo-presenca-api.onrender.com/consulta",
-            params={
-                "cpf": cpf,
-                "nome": nome,
-                "telefone": telefone,
-                "lead_id": str(lead_id)
-            },
-            timeout=60
+        # CHAMA DIRETO O FLUXO, SEM REQUESTS.GET PARA A PRÓPRIA API
+        data = tentar_fluxo_completo(
+            cpf=cpf,
+            nome=nome,
+            telefone=telefone,
+            lead_id=str(lead_id),
+            autorizacao_id=None
         )
 
-        print("[STATUS PRESENÇA]", response.status_code, flush=True)
-        print("[TEXTO PRESENÇA]", response.text, flush=True)
+        log_step("KOMMO_WEBHOOK", "RESULTADO FINAL DO FLUXO", data)
 
-        try:
-            data = response.json()
-        except Exception:
-            criar_nota_kommo(lead_id, "Erro ao interpretar a resposta da consulta Presença.")
-            mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
-            return {"status": "ok", "mensagem": "resposta_invalida_consulta"}
-
-        elegibilidade = data.get("elegibilidade")
-        valor_disponivel = data.get("valor_disponivel")
-        parcela = data.get("parcela")
-        autorizacao_id = data.get("autorizacao_id")
-        link_autorizacao = data.get("link_autorizacao")
-
-        if data.get("status") == "aguardando_autorizacao":
-            texto_nota = (
-                "📌 RETORNO API PRESENÇA\n\n"
-                f"Lead ID: {lead_id}\n"
-                f"Status: AGUARDANDO AUTORIZAÇÃO\n"
-                f"Nome: {nome}\n"
-                f"CPF: {cpf}\n"
-                f"Telefone: {telefone}\n\n"
-                f"Autorização ID: {autorizacao_id or '-'}\n"
-                f"Link autorização: {link_autorizacao or '-'}"
-            )
-        elif elegibilidade == "sim":
-            texto_nota = (
-                "✅ RETORNO API PRESENÇA\n\n"
-                f"Lead ID: {lead_id}\n"
-                f"Status: ELEGÍVEL\n"
-                f"Nome: {nome}\n"
-                f"CPF: {cpf}\n"
-                f"Telefone: {telefone}\n\n"
-                f"Valor disponível: {format_brl(valor_disponivel)}\n"
-                f"Parcela: {format_brl(parcela)}"
-            )
-        else:
-            texto_nota = (
-                "⚠️ RETORNO API PRESENÇA\n\n"
-                f"Lead ID: {lead_id}\n"
-                f"Status: INELEGÍVEL\n"
-                f"Nome: {nome}\n"
-                f"CPF: {cpf}\n"
-                f"Telefone: {telefone}"
-            )
+        texto_nota = montar_texto_nota_kommo(
+            lead_id=str(lead_id),
+            nome=nome,
+            cpf=cpf,
+            telefone=telefone,
+            data=data
+        )
 
         criar_nota_kommo(lead_id, texto_nota)
         mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
@@ -1080,5 +1192,5 @@ async def kommo_webhook(request: Request):
         return {"status": "ok", "resultado": data}
 
     except Exception as e:
-        print("[ERRO /kommo-webhook]", str(e), flush=True)
+        log_step("ERRO_KOMMO_WEBHOOK", str(e))
         return {"status": "erro", "mensagem": str(e)}
