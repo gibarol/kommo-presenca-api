@@ -65,15 +65,79 @@ def normalize_cpf(value: Any) -> str:
 
 
 def normalize_phone(value: Any) -> str:
-    return only_digits(value)
+    """
+    Regras:
+    - remove tudo que não for número
+    - remove prefixo 55 se houver
+    - se tiver 10 dígitos: insere 9 após o DDD
+    - se tiver 11 dígitos: ok
+    - se tiver mais de 11: tenta aproveitar os últimos 11
+    - se tiver estrutura parcial com DDD + 8 dígitos: insere 9 no meio
+    """
+    original = str(value or "")
+    digits = only_digits(original)
+
+    if not digits:
+        log_step("PHONE", "Telefone vazio", {"original": original})
+        return ""
+
+    # Remove código do país se vier
+    if digits.startswith("55") and len(digits) > 11:
+        digits = digits[2:]
+
+    # Caso clássico: DDD + 8 dígitos
+    if len(digits) == 10:
+        treated = digits[:2] + "9" + digits[2:]
+        log_step("PHONE", "Telefone com 10 dígitos, inserido 9", {
+            "original": original,
+            "digits": digits,
+            "treated": treated
+        })
+        return treated
+
+    # Já está ok
+    if len(digits) == 11:
+        return digits
+
+    # Se veio grande demais, tenta últimos 11
+    if len(digits) > 11:
+        tail = digits[-11:]
+        if len(tail) == 11:
+            log_step("PHONE", "Telefone >11, usando últimos 11", {
+                "original": original,
+                "digits": digits,
+                "treated": tail
+            })
+            return tail
+
+    # Tentativa adicional:
+    # pega DDD + últimos 8 dígitos e coloca 9 no meio
+    if len(digits) >= 10:
+        ddd = digits[:2]
+        ultimos_8 = digits[-8:]
+        treated = ddd + "9" + ultimos_8
+        if len(treated) == 11:
+            log_step("PHONE", "Telefone reconstruído com DDD + 9 + últimos 8", {
+                "original": original,
+                "digits": digits,
+                "treated": treated
+            })
+            return treated
+
+    log_step("PHONE", "Telefone inválido após normalização", {
+        "original": original,
+        "digits": digits
+    })
+    return ""
 
 
 def split_phone(phone: str) -> Tuple[str, str]:
     digits = only_digits(phone)
-    if len(digits) >= 11:
+    if len(digits) == 11:
         return digits[:2], digits[2:]
     if len(digits) == 10:
-        return digits[:2], digits[2:]
+        fixed = digits[:2] + "9" + digits[2:]
+        return fixed[:2], fixed[2:]
     return "11", "999999999"
 
 
@@ -466,6 +530,20 @@ def presenca_login_token() -> str:
 
 
 def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> Dict[str, Any]:
+    if not telefone or len(telefone) != 11:
+        log_step("TERMO", "Telefone inválido para geração de termo", {
+            "cpf": cpf,
+            "nome": nome,
+            "telefone": telefone
+        })
+        return {
+            "http_status": 400,
+            "autorizacao_id": None,
+            "link_autorizacao": None,
+            "detalhe_termo": {"erro": "telefone_invalido_para_termo"},
+            "erro_telefone_reutilizado": False
+        }
+
     url = f"{BASE_URL}/consultas/termo-inss"
     payload = {
         "cpf": cpf,
@@ -497,6 +575,8 @@ def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> 
 
     if not autorizacao_id:
         autorizacao_id = find_first_id(body)
+
+    log_step("TERMO_GERADO", f"ID: {autorizacao_id} | LINK: {termo_link}", body)
 
     return {
         "http_status": resp.status_code,
@@ -537,6 +617,7 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
     }
 
     log_step("ASSINAR_TERMO", f"URL: {url}")
+    log_step("ASSINATURA", f"tentando auto assinatura ID={autorizacao_id}")
 
     try:
         log_step("ASSINAR_TERMO", "Tentando payload_user", payload_user)
@@ -545,10 +626,14 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         log_step("ASSINAR_TERMO", f"STATUS USER: {resp.status_code}", body)
 
         if resp.status_code in (200, 201, 202, 204):
-            return {"ok": True, "detalhe": body, "modo": "user_payload"}
+            resultado = {"ok": True, "detalhe": body, "modo": "user_payload"}
+            log_step("ASSINATURA_RESULTADO", "Auto assinatura concluída", resultado)
+            return resultado
     except requests.exceptions.ReadTimeout as e:
+        resultado = {"ok": True, "detalhe": {"warning": "timeout_no_put_user_payload"}, "modo": "user_payload_timeout"}
         log_step("ASSINAR_TERMO", f"TIMEOUT USER: {str(e)}")
-        return {"ok": True, "detalhe": {"warning": "timeout_no_put_user_payload"}, "modo": "user_payload_timeout"}
+        log_step("ASSINATURA_RESULTADO", "Timeout tratado como sucesso operacional", resultado)
+        return resultado
     except Exception as e:
         log_step("ASSINAR_TERMO", f"ERRO USER: {str(e)}")
 
@@ -559,15 +644,23 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         log_step("ASSINAR_TERMO", f"STATUS DOC: {resp2.status_code}", body2)
 
         if resp2.status_code in (200, 201, 202, 204):
-            return {"ok": True, "detalhe": body2, "modo": "doc_payload"}
+            resultado = {"ok": True, "detalhe": body2, "modo": "doc_payload"}
+            log_step("ASSINATURA_RESULTADO", "Auto assinatura concluída em doc_payload", resultado)
+            return resultado
 
-        return {"ok": False, "detalhe": body2, "modo": "doc_payload"}
+        resultado = {"ok": False, "detalhe": body2, "modo": "doc_payload"}
+        log_step("ASSINATURA_RESULTADO", "Auto assinatura não confirmada", resultado)
+        return resultado
     except requests.exceptions.ReadTimeout as e:
+        resultado = {"ok": True, "detalhe": {"warning": "timeout_no_put_doc_payload"}, "modo": "doc_payload_timeout"}
         log_step("ASSINAR_TERMO", f"TIMEOUT DOC: {str(e)}")
-        return {"ok": True, "detalhe": {"warning": "timeout_no_put_doc_payload"}, "modo": "doc_payload_timeout"}
+        log_step("ASSINATURA_RESULTADO", "Timeout doc tratado como sucesso operacional", resultado)
+        return resultado
     except Exception as e:
+        resultado = {"ok": False, "detalhe": {"erro": str(e)}, "modo": "doc_payload_exception"}
         log_step("ASSINAR_TERMO", f"ERRO DOC: {str(e)}")
-        return {"ok": False, "detalhe": {"erro": str(e)}, "modo": "doc_payload_exception"}
+        log_step("ASSINATURA_RESULTADO", "Erro na auto assinatura", resultado)
+        return resultado
 
 
 def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
@@ -597,13 +690,13 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
             ultimo_response = resp
 
             if resp.status_code == 400 and body_is_definitive_inelegible(body):
-                log_step("VINCULOS_RETRY", "Inelegibilidade definitiva detectada")
+                log_step("VINCULOS_RETRY", "Inelegibilidade definitiva detectada", body)
                 return resp
 
             if resp.status_code == 400 and body_has_missing_authorization(body):
-                pass
+                log_step("VINCULOS_RETRY", "Autorização ainda ausente", body)
             elif resp.status_code == 429:
-                pass
+                log_step("VINCULOS_RETRY", "Rate limit em vínculos", body)
             else:
                 return resp
 
@@ -837,8 +930,11 @@ def tentar_fluxo_completo(
     token = presenca_login_token()
     headers = auth_headers(token)
 
-    log_step("FLUXO", f"Início do fluxo | lead_id={lead_id} | cpf={cpf}")
+    telefone = normalize_phone(telefone)
 
+    log_step("FLUXO", f"Início do fluxo | lead_id={lead_id} | cpf={cpf} | telefone={telefone}")
+
+    # Se já veio com autorização, prioriza esse fluxo sem mexer no que já está funcionando
     if autorizacao_id:
         assinatura = assinar_termo(headers, autorizacao_id)
         log_step("FLUXO", "Resultado assinatura com autorizacao_id", assinatura)
@@ -896,6 +992,7 @@ def tentar_fluxo_completo(
             mensagem_tecnica="Falha após assinatura com autorizacao_id"
         )
 
+    # Primeira tentativa direta de vínculos
     try:
         resp_vinc = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
         body_vinc = safe_json(resp_vinc)
@@ -919,6 +1016,7 @@ def tentar_fluxo_completo(
                 mensagem_tecnica=f"Inelegibilidade definitiva: {body_vinc}"
             )
 
+        # Só gera termo quando a falta de autorização for realmente o caso
         if not (resp_vinc.status_code == 400 and body_has_missing_authorization(body_vinc)):
             return build_response(
                 lead_id=lead_id,
@@ -926,6 +1024,8 @@ def tentar_fluxo_completo(
                 elegibilidade="nao",
                 mensagem_tecnica=f"Resposta inicial fora do fluxo esperado: {body_vinc}"
             )
+
+        log_step("FLUXO", "Entrando em geração de termo por falta de autorização", body_vinc)
 
     except Exception as e:
         log_step("VINCULOS_INICIAL", f"erro antes de gerar termo: {str(e)}")
@@ -936,6 +1036,7 @@ def tentar_fluxo_completo(
             mensagem_tecnica=f"Erro inicial vínculos: {str(e)}"
         )
 
+    # Geração de termo
     termo = gerar_termo(headers, cpf, nome, telefone)
     novo_id = termo.get("autorizacao_id")
     link = termo.get("link_autorizacao")
@@ -953,14 +1054,17 @@ def tentar_fluxo_completo(
             lead_id=lead_id,
             status="sucesso",
             elegibilidade="nao",
+            link_autorizacao=link,
             mensagem_tecnica=f"Não foi possível gerar autorizacao_id: {termo}"
         )
 
+    # Autoassinatura
     assinatura_auto = assinar_termo(headers, novo_id)
     log_step("ASSINATURA_AUTO", "Resultado", assinatura_auto)
 
     if assinatura_auto.get("ok"):
         try:
+            log_step("AUTOAUTORIZACAO", f"Aguardando {WAIT_AFTER_AUTO_SIGN}s após autoassinatura")
             time.sleep(WAIT_AFTER_AUTO_SIGN)
 
             resp_vinc_2 = tentar_vinculos_com_retry(headers, cpf, VINCULOS_RETRY_TENTATIVAS, VINCULOS_RETRY_ESPERA)
@@ -974,6 +1078,8 @@ def tentar_fluxo_completo(
                     lead_id=lead_id,
                     status="sucesso",
                     elegibilidade="nao",
+                    autorizacao_id=novo_id,
+                    link_autorizacao=link,
                     mensagem_tecnica="Rate limit em vínculos após autoassinatura"
                 )
 
@@ -982,11 +1088,13 @@ def tentar_fluxo_completo(
                     lead_id=lead_id,
                     status="sucesso",
                     elegibilidade="nao",
+                    autorizacao_id=novo_id,
+                    link_autorizacao=link,
                     mensagem_tecnica=f"Inelegibilidade definitiva após autoassinatura: {body_vinc_2}"
                 )
 
             if resp_vinc_2.status_code == 400 and body_has_missing_authorization(body_vinc_2):
-                log_step("AUTOAUTORIZACAO", "autorização ainda não refletiu, aguardando retry final...")
+                log_step("AUTOAUTORIZACAO", "autorização ainda não refletiu, aguardando retry final...", body_vinc_2)
                 time.sleep(10)
 
                 resp_vinc_3 = tentar_vinculos_com_retry(headers, cpf, 2, 5)
@@ -1000,6 +1108,8 @@ def tentar_fluxo_completo(
                         lead_id=lead_id,
                         status="sucesso",
                         elegibilidade="nao",
+                        autorizacao_id=novo_id,
+                        link_autorizacao=link,
                         mensagem_tecnica="Rate limit no retry final"
                     )
 
@@ -1008,7 +1118,18 @@ def tentar_fluxo_completo(
                         lead_id=lead_id,
                         status="sucesso",
                         elegibilidade="nao",
+                        autorizacao_id=novo_id,
+                        link_autorizacao=link,
                         mensagem_tecnica=f"Inelegibilidade definitiva no retry final: {body_vinc_3}"
+                    )
+
+                if resp_vinc_3.status_code == 400 and body_has_missing_authorization(body_vinc_3):
+                    return build_response(
+                        lead_id=lead_id,
+                        status="aguardando_autorizacao",
+                        autorizacao_id=novo_id,
+                        link_autorizacao=link,
+                        mensagem_tecnica=f"Mesmo após retry final, autorização ainda não refletiu: {body_vinc_3}"
                     )
 
         except Exception as e:
@@ -1167,7 +1288,6 @@ async def kommo_webhook(request: Request):
             mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
             return {"status": "ok", "mensagem": "dados_incompletos"}
 
-        # CHAMA DIRETO O FLUXO, SEM REQUESTS.GET PARA A PRÓPRIA API
         data = tentar_fluxo_completo(
             cpf=cpf,
             nome=nome,
