@@ -19,6 +19,7 @@ PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 
 KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "")
 KOMMO_SUBDOMAIN = os.getenv("KOMMO_SUBDOMAIN", "")
+KOMMO_TARGET_STATUS_ID = int(os.getenv("KOMMO_TARGET_STATUS_ID", "103281440"))
 
 TIMEOUT = int(os.getenv("TIMEOUT_SECONDS", "45"))
 THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
@@ -413,12 +414,32 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
         print(f"[KOMMO] ERRO AO CRIAR NOTA: {str(e)}", flush=True)
 
 
+def mover_lead_kommo(lead_id: str, status_id: int) -> None:
+    if not lead_id or not status_id:
+        return
+
+    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+    body = [
+        {
+            "id": int(lead_id),
+            "status_id": int(status_id)
+        }
+    ]
+
+    try:
+        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
+        print(f"[KOMMO] MOVE STATUS: {resp.status_code}", flush=True)
+        print(f"[KOMMO] MOVE BODY: {resp.text[:1000]}", flush=True)
+    except Exception as e:
+        print(f"[KOMMO] ERRO AO MOVER LEAD: {str(e)}", flush=True)
+
+
 # =========================
 # PRESENÇA API
 # =========================
 def presenca_login_token() -> str:
     if not PRESENCA_LOGIN or not PRESENCA_SENHA:
-        raise RuntimeError("PRESENCA_LOGIN_ou_SENHA_nao_configurada")
+        raise RuntimeError("PRESENCA_LOGIN_ou_SENHA_nao_CONFIGURADA")
 
     url = f"{BASE_URL}/login"
     payload = {"login": PRESENCA_LOGIN, "senha": PRESENCA_SENHA}
@@ -991,6 +1012,7 @@ async def kommo_webhook(request: Request):
                 lead_id,
                 "Não foi possível consultar: faltam dados obrigatórios no lead (CPF, nome ou telefone)."
             )
+            mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
             return {"status": "ok", "mensagem": "dados_incompletos"}
 
         response = requests.get(
@@ -1011,13 +1033,49 @@ async def kommo_webhook(request: Request):
             data = response.json()
         except Exception:
             criar_nota_kommo(lead_id, "Erro ao interpretar a resposta da consulta Presença.")
+            mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
             return {"status": "ok", "mensagem": "resposta_invalida_consulta"}
 
-        mensagem_cliente = data.get("mensagem_cliente") or ""
-        if not mensagem_cliente:
-            mensagem_cliente = "Consulta processada, mas sem mensagem formatada."
+        elegibilidade = data.get("elegibilidade")
+        valor_disponivel = data.get("valor_disponivel")
+        parcela = data.get("parcela")
+        autorizacao_id = data.get("autorizacao_id")
+        link_autorizacao = data.get("link_autorizacao")
 
-        criar_nota_kommo(lead_id, mensagem_cliente)
+        if data.get("status") == "aguardando_autorizacao":
+            texto_nota = (
+                "📌 RETORNO API PRESENÇA\n\n"
+                f"Lead ID: {lead_id}\n"
+                f"Status: AGUARDANDO AUTORIZAÇÃO\n"
+                f"Nome: {nome}\n"
+                f"CPF: {cpf}\n"
+                f"Telefone: {telefone}\n\n"
+                f"Autorização ID: {autorizacao_id or '-'}\n"
+                f"Link autorização: {link_autorizacao or '-'}"
+            )
+        elif elegibilidade == "sim":
+            texto_nota = (
+                "✅ RETORNO API PRESENÇA\n\n"
+                f"Lead ID: {lead_id}\n"
+                f"Status: ELEGÍVEL\n"
+                f"Nome: {nome}\n"
+                f"CPF: {cpf}\n"
+                f"Telefone: {telefone}\n\n"
+                f"Valor disponível: {format_brl(valor_disponivel)}\n"
+                f"Parcela: {format_brl(parcela)}"
+            )
+        else:
+            texto_nota = (
+                "⚠️ RETORNO API PRESENÇA\n\n"
+                f"Lead ID: {lead_id}\n"
+                f"Status: INELEGÍVEL\n"
+                f"Nome: {nome}\n"
+                f"CPF: {cpf}\n"
+                f"Telefone: {telefone}"
+            )
+
+        criar_nota_kommo(lead_id, texto_nota)
+        mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
 
         return {"status": "ok", "resultado": data}
 
