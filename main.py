@@ -875,8 +875,14 @@ async def kommo_webhook(request: Request):
     timeout=60
 )
 
-        data = response.json()
-        print("Resposta Presença:", data)
+print("STATUS PRESENÇA:", response.status_code)
+print("TEXTO PRESENÇA:", response.text)
+
+try:
+    data = response.json()
+except:
+    print("ERRO AO LER JSON:", response.text)
+    return {"erro": "resposta inválida da consulta"}
 
         # =========================
         # 3. TRATAR RESPOSTA
