@@ -2,6 +2,7 @@ import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs
 
 import requests
 from fastapi import FastAPI, Request
@@ -309,7 +310,7 @@ def kommo_headers() -> Dict[str, str]:
     }
 
 
-def extrair_lead_id_do_webhook(payload: Any) -> Optional[str]:
+def extrair_lead_id_do_webhook(payload: Any, raw_body_text: str = "") -> Optional[str]:
     try:
         if isinstance(payload, dict):
             if "leads" in payload and isinstance(payload["leads"], dict):
@@ -324,6 +325,16 @@ def extrair_lead_id_do_webhook(payload: Any) -> Optional[str]:
                 return str(leads[0]["id"])
     except Exception:
         pass
+
+    try:
+        if raw_body_text:
+            parsed = parse_qs(raw_body_text, keep_blank_values=True)
+            lead_id = parsed.get("leads[status][0][id]", [None])[0]
+            if lead_id:
+                return str(lead_id)
+    except Exception:
+        pass
+
     return None
 
 
@@ -945,7 +956,8 @@ def consulta(
 async def kommo_webhook(request: Request):
     try:
         raw_body = await request.body()
-        print("[KOMMO RAW BODY]", raw_body.decode("utf-8", errors="ignore"), flush=True)
+        raw_body_text = raw_body.decode("utf-8", errors="ignore")
+        print("[KOMMO RAW BODY]", raw_body_text, flush=True)
 
         payload = {}
         try:
@@ -955,7 +967,7 @@ async def kommo_webhook(request: Request):
 
         print("[KOMMO PAYLOAD]", payload, flush=True)
 
-        lead_id = extrair_lead_id_do_webhook(payload)
+        lead_id = extrair_lead_id_do_webhook(payload, raw_body_text)
         print("[KOMMO LEAD ID EXTRAIDO]", lead_id, flush=True)
 
         if not lead_id:
