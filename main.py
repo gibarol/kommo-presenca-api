@@ -75,15 +75,6 @@ def normalize_cpf(value: Any) -> str:
 
 
 def normalize_phone(value: Any) -> str:
-    """
-    Regras:
-    - remove tudo que não for número
-    - remove prefixo 55 se houver
-    - se tiver 10 dígitos: insere 9 após o DDD
-    - se tiver 11 dígitos: ok
-    - se tiver mais de 11: tenta aproveitar os últimos 11
-    - se tiver estrutura parcial com DDD + 8 dígitos: insere 9 no meio
-    """
     original = str(value or "")
     digits = only_digits(original)
 
@@ -282,17 +273,54 @@ def extract_candidates_vinculos(body: Any) -> List[dict]:
     return []
 
 
-def pick_vinculo(vinculos: List[dict]) -> Optional[dict]:
-    if not vinculos:
-        return None
+def is_truthy(value: Any) -> bool:
+    return value is True or str(value).strip().lower() in {"true", "sim", "1", "yes"}
 
-    elegiveis = []
+
+def vinculo_tem_dados_minimos(v: dict) -> bool:
+    matricula = str(
+        v.get("matricula")
+        or v.get("registroEmpregaticio")
+        or v.get("registro")
+        or v.get("matriculaRegistro")
+        or ""
+    ).strip()
+
+    cnpj = normalize_cnpj_like(
+        v.get("numeroInscricaoEmpregador")
+        or v.get("cnpjEmpregador")
+        or v.get("cnpj")
+        or ""
+    )
+
+    return bool(matricula and cnpj)
+
+
+def ordenar_vinculos_para_teste(vinculos: List[dict]) -> List[dict]:
+    candidatos = []
+
     for v in vinculos:
-        elegivel = v.get("elegivel")
-        if elegivel is True or str(elegivel).lower() in {"true", "sim", "1"}:
-            elegiveis.append(v)
+        score = 0
 
-    return elegiveis[0] if elegiveis else vinculos[0]
+        if is_truthy(v.get("elegivel")):
+            score += 100
+
+        if is_truthy(v.get("empresaElegivel")):
+            score += 50
+
+        if is_truthy(v.get("possuiMargem")):
+            score += 30
+
+        if is_truthy(v.get("ativo")):
+            score += 20
+
+        if vinculo_tem_dados_minimos(v):
+            score += 10
+
+        candidatos.append((score, v))
+
+    candidatos.sort(key=lambda x: x[0], reverse=True)
+    return [item[1] for item in candidatos]
 
 
 def extract_valor_parcela(margem_resp: dict) -> float:
@@ -333,6 +361,11 @@ def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, flo
     return 0.0, fallback_parcela
 
 
+def erro_simulacao_empresa_nao_elegivel(simulacao: Any) -> bool:
+    texto = str(simulacao).lower()
+    return "empresa não elegível" in texto or "empresa nao elegivel" in texto
+
+
 def format_brl(value: Any) -> str:
     try:
         n = float(value)
@@ -369,29 +402,21 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
 
 
 def preparar_texto_para_campo_kommo(texto: str) -> str:
-    """
-    Prepara a mensagem para ser salva em campo do Kommo.
-    Remove emojis simples, quebras de linha e espaços duplicados.
-    Deixa tudo em uma linha só para o bot enviar inteiro.
-    """
     if not texto:
         return ""
 
     texto = str(texto)
-
     texto = (
-        texto.replace("🙂", "")
-             .replace("💰", "")
-             .replace("📉", "")
-             .replace("📌", "")
-             .replace("✅", "")
-             .replace("⚠️", "")
-             .replace("📆", "")
+        texto.replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("\t", " ")
+        .replace("\u00a0", " ")
+        .replace("\u200b", "")
+        .replace("\ufeff", "")
     )
 
-    texto = texto.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     texto = re.sub(r"\s+", " ", texto).strip()
-
     return texto
 
 
@@ -415,38 +440,38 @@ def build_response(
     if status == STATUS_AGUARDANDO_AUTORIZACAO:
         tipo_mensagem = "aguardando_autorizacao"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Para continuar sua consulta, preciso que você conclua esta autorização rápida:\n\n"
-            f"{link_autorizacao or ''}\n\n"
-            "Assim que finalizar, me avise aqui para eu seguir com a análise."
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            f"Para continuar sua consulta, preciso que você conclua esta autorização rápida: {link_autorizacao or ''} "
+            "Assim que finalizar, me avise por aqui para eu seguir com a análise."
         )
 
     elif status == STATUS_AGUARDANDO_VIRADA_FOLHA:
         tipo_mensagem = "aguardando_virada_folha"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Sua consulta está em período de virada de folha.\n\n"
-            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês.\n\n"
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            "Sua consulta está em período de virada de folha. "
+            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês. "
             "📌 Assim que a base normalizar, posso consultar novamente para você."
         )
 
     elif elegibilidade == "sim":
         tipo_mensagem = "elegivel"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "Temos uma boa notícia por aqui.\n\n"
-            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
-            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
-            "Se quiser, sigo com os próximos passos para você."
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            f"Temos uma boa notícia: você tem aproximadamente {format_brl(valor_disponivel)} disponível, "
+            f"com parcela estimada de {format_brl(parcela)}. "
+            "✅ Se quiser, sigo com os próximos passos para você."
         )
 
     elif elegibilidade == "nao":
         tipo_mensagem = "nao_elegivel"
         mensagem_cliente = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂\n\n"
-            "No momento não encontramos uma condição disponível para essa consulta.\n\n"
+            f"Olá, {saudacao_nome}tudo bem? 🙂 "
+            "No momento não encontramos uma condição disponível para essa consulta. "
             "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
         )
+
+    mensagem_cliente = preparar_texto_para_campo_kommo(mensagem_cliente)
 
     return {
         "lead_id": lead_id,
@@ -458,7 +483,7 @@ def build_response(
         "link_autorizacao": link_autorizacao,
         "mensagem_cliente": mensagem_cliente,
         "tipo_mensagem": tipo_mensagem,
-        "mensagem_tecnica": mensagem_tecnica
+        "mensagem_tecnica": mensagem_tecnica,
     }
 
 
@@ -487,9 +512,8 @@ def extrair_lead_id_do_webhook(payload: Any, raw_body_text: str = "") -> Optiona
         if isinstance(payload, dict):
             if "leads" in payload and isinstance(payload["leads"], dict):
                 status_arr = payload["leads"].get("status", [])
-                if status_arr and isinstance(status_arr[0], dict):
-                    if status_arr[0].get("id"):
-                        return str(status_arr[0]["id"])
+                if status_arr and isinstance(status_arr[0], dict) and status_arr[0].get("id"):
+                    return str(status_arr[0]["id"])
 
             embedded = payload.get("_embedded", {})
             leads = embedded.get("leads", [])
@@ -582,11 +606,6 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
 
 
 def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
-    """
-    Salva a mensagem pronta da API no campo personalizado do lead.
-    Aqui usaremos o campo Interesse (field_id 994693), mas em formato limpo
-    e sem quebra de linha para o bot disparar inteira.
-    """
     if not lead_id or not texto:
         return
 
@@ -597,18 +616,15 @@ def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
     texto_limpo = preparar_texto_para_campo_kommo(texto)
 
     url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
-
-    body = [
-        {
-            "id": int(lead_id),
-            "custom_fields_values": [
-                {
-                    "field_id": KOMMO_MSG_FIELD_ID,
-                    "values": [{"value": texto_limpo}]
-                }
-            ]
-        }
-    ]
+    body = [{
+        "id": int(lead_id),
+        "custom_fields_values": [
+            {
+                "field_id": KOMMO_MSG_FIELD_ID,
+                "values": [{"value": texto_limpo}]
+            }
+        ]
+    }]
 
     try:
         resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
@@ -622,27 +638,40 @@ def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
     if not lead_id or not nomes_tags:
         return
 
-    tags_payload = []
-    for nome_tag in nomes_tags:
-        nome_tag = str(nome_tag or "").strip()
-        if not nome_tag:
-            continue
-        tags_payload.append({"name": nome_tag})
-
-    if not tags_payload:
-        return
-
-    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
-    body = [{
-        "id": int(lead_id),
-        "_embedded": {
-            "tags": tags_payload
-        }
-    }]
-
     try:
-        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
-        log_step("KOMMO_TAG_APLICAR", f"Status: {resp.status_code}", resp.text[:1000])
+        url_get = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
+        resp_get = requests.get(url_get, headers=kommo_headers(), timeout=30)
+        log_step("KOMMO_TAG_GET", f"Status: {resp_get.status_code}", resp_get.text[:1000])
+
+        tags_existentes = []
+
+        if resp_get.ok:
+            data = safe_json(resp_get)
+            tags_atuais = data.get("_embedded", {}).get("tags", []) if isinstance(data, dict) else []
+            for tag in tags_atuais:
+                nome_tag = str(tag.get("name", "")).strip()
+                if nome_tag:
+                    tags_existentes.append(nome_tag)
+
+        todas_tags = tags_existentes[:]
+        for nome_tag in nomes_tags:
+            nome_tag = str(nome_tag or "").strip()
+            if nome_tag and nome_tag not in todas_tags:
+                todas_tags.append(nome_tag)
+
+        tags_payload = [{"name": tag} for tag in todas_tags]
+
+        url_patch = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+        body = [{
+            "id": int(lead_id),
+            "_embedded": {
+                "tags": tags_payload
+            }
+        }]
+
+        resp_patch = requests.patch(url_patch, headers=kommo_headers(), json=body, timeout=30)
+        log_step("KOMMO_TAG_APLICAR", f"Status: {resp_patch.status_code}", resp_patch.text[:1000])
+
     except Exception as e:
         log_step("KOMMO_TAG_APLICAR", f"Erro ao aplicar tags: {str(e)}")
 
@@ -652,12 +681,10 @@ def mover_lead_kommo(lead_id: str, status_id: int) -> None:
         return
 
     url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
-    body = [
-        {
-            "id": int(lead_id),
-            "status_id": int(status_id)
-        }
-    ]
+    body = [{
+        "id": int(lead_id),
+        "status_id": int(status_id)
+    }]
 
     try:
         resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
@@ -984,7 +1011,7 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
         "documentos": []
     }
 
-    log_step("SIMULACAO", f"URL: {url}", payload)
+    log_step("SIMULACAO_PAYLOAD_FINAL", "Payload enviado para simulação", payload)
 
     resp = do_post(url, payload, headers=headers, timeout=(10, 60))
     body = safe_json(resp)
@@ -1014,9 +1041,9 @@ def processar_fluxo_com_vinculos_body(
     nome: Optional[str]
 ) -> Dict[str, Any]:
     vinculos = extract_candidates_vinculos(vinculos_body)
-    vinculo = pick_vinculo(vinculos)
+    log_step("PROCESSAR_VINCULOS", "Lista de vínculos recebida", vinculos)
 
-    if not vinculo:
+    if not vinculos:
         return build_response(
             lead_id=lead_id,
             status=STATUS_SUCESSO,
@@ -1025,84 +1052,134 @@ def processar_fluxo_com_vinculos_body(
             nome=nome
         )
 
-    matricula = str(
-        vinculo.get("matricula")
-        or vinculo.get("registroEmpregaticio")
-        or vinculo.get("registro")
-        or vinculo.get("matriculaRegistro")
-        or ""
-    )
+    vinculos_ordenados = ordenar_vinculos_para_teste(vinculos)
+    log_step("PROCESSAR_VINCULOS", "Vínculos ordenados para teste", vinculos_ordenados)
 
-    cnpj = normalize_cnpj_like(
-        vinculo.get("numeroInscricaoEmpregador")
-        or vinculo.get("cnpjEmpregador")
-        or vinculo.get("cnpj")
-        or ""
-    )
+    erros_encontrados = []
 
-    if not matricula or not cnpj:
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="nao",
-            mensagem_tecnica="Não foi possível extrair matrícula/cnpj",
-            nome=nome
+    for idx, vinculo in enumerate(vinculos_ordenados, start=1):
+        log_step("PROCESSAR_VINCULOS", f"Testando vínculo {idx}", vinculo)
+
+        matricula = str(
+            vinculo.get("matricula")
+            or vinculo.get("registroEmpregaticio")
+            or vinculo.get("registro")
+            or vinculo.get("matriculaRegistro")
+            or ""
+        ).strip()
+
+        cnpj = normalize_cnpj_like(
+            vinculo.get("numeroInscricaoEmpregador")
+            or vinculo.get("cnpjEmpregador")
+            or vinculo.get("cnpj")
+            or ""
         )
 
-    margem = consultar_margem(headers, cpf, matricula, cnpj)
+        if not matricula or not cnpj:
+            erros_encontrados.append({
+                "tipo": "vinculo_incompleto",
+                "matricula": matricula,
+                "cnpj": cnpj,
+                "vinculo": vinculo
+            })
+            continue
 
-    if isinstance(margem, dict) and (
-        margem.get("erro_rate_limit")
-        or margem.get("erro_timeout")
-        or margem.get("erro_generico")
-    ):
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="nao",
-            mensagem_tecnica=f"Erro na margem: {margem}",
-            nome=nome
-        )
+        log_step("PROCESSAR_VINCULOS", "Usando matrícula/cnpj", {
+            "matricula": matricula,
+            "cnpj": cnpj
+        })
 
-    valor_parcela = extract_valor_parcela(margem)
-    if valor_parcela <= 0:
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="nao",
-            mensagem_tecnica="Margem zerada",
-            nome=nome
-        )
+        margem = consultar_margem(headers, cpf, matricula, cnpj)
+        log_step("PROCESSAR_VINCULOS", "Retorno margem", margem)
 
-    simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
+        if isinstance(margem, dict) and margem.get("erro_rate_limit"):
+            return build_response(
+                lead_id=lead_id,
+                status=STATUS_SUCESSO,
+                elegibilidade="nao",
+                mensagem_tecnica="Rate limit na margem",
+                nome=nome
+            )
 
-    if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="nao",
-            mensagem_tecnica=f"Erro na simulação: {simulacao}",
-            nome=nome
-        )
+        if isinstance(margem, dict) and (margem.get("erro_timeout") or margem.get("erro_generico")):
+            erros_encontrados.append({
+                "tipo": "erro_margem",
+                "detalhe": margem,
+                "vinculo": vinculo
+            })
+            continue
 
-    valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
+        valor_parcela = extract_valor_parcela(margem)
+        if valor_parcela <= 0:
+            erros_encontrados.append({
+                "tipo": "margem_zerada",
+                "detalhe": margem,
+                "vinculo": vinculo
+            })
+            continue
 
-    if valor_disponivel <= 0 or parcela <= 0:
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="nao",
-            mensagem_tecnica="Oferta inválida",
-            nome=nome
-        )
+        simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
+        log_step("PROCESSAR_VINCULOS", "Retorno simulação", simulacao)
+
+        if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
+            if erro_simulacao_empresa_nao_elegivel(simulacao):
+                erros_encontrados.append({
+                    "tipo": "empresa_nao_elegivel_neste_vinculo",
+                    "detalhe": simulacao,
+                    "vinculo": vinculo
+                })
+                continue
+
+            erros_encontrados.append({
+                "tipo": "erro_simulacao",
+                "detalhe": simulacao,
+                "vinculo": vinculo
+            })
+            continue
+
+        valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
+
+        if valor_disponivel > 0 and parcela > 0:
+            log_step("PROCESSAR_VINCULOS", "Vínculo aprovado com sucesso", {
+                "valor_disponivel": valor_disponivel,
+                "parcela": parcela,
+                "vinculo": vinculo
+            })
+
+            return build_response(
+                lead_id=lead_id,
+                status=STATUS_SUCESSO,
+                elegibilidade="sim",
+                valor_disponivel=valor_disponivel,
+                parcela=parcela,
+                mensagem_tecnica="Consulta concluída com sucesso",
+                nome=nome
+            )
+
+        erros_encontrados.append({
+            "tipo": "oferta_invalida",
+            "valor_disponivel": valor_disponivel,
+            "parcela": parcela,
+            "vinculo": vinculo
+        })
+
+    log_step("PROCESSAR_VINCULOS", "Nenhum vínculo aprovou", erros_encontrados)
+
+    houve_empresa_nao_elegivel = any(e.get("tipo") == "empresa_nao_elegivel_neste_vinculo" for e in erros_encontrados)
+    houve_margem_zerada = any(e.get("tipo") == "margem_zerada" for e in erros_encontrados)
+
+    mensagem_final = "Nenhum vínculo retornou oferta válida"
+
+    if houve_empresa_nao_elegivel and len(erros_encontrados) == len(vinculos_ordenados):
+        mensagem_final = "Todos os vínculos testados retornaram empresa não elegível"
+    elif houve_margem_zerada:
+        mensagem_final = "Todos os vínculos testados retornaram margem zerada ou inválida"
 
     return build_response(
         lead_id=lead_id,
         status=STATUS_SUCESSO,
-        elegibilidade="sim",
-        valor_disponivel=valor_disponivel,
-        parcela=parcela,
-        mensagem_tecnica="Consulta concluída com sucesso",
+        elegibilidade="nao",
+        mensagem_tecnica=mensagem_final,
         nome=nome
     )
 
@@ -1401,52 +1478,43 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
     if status == STATUS_AGUARDANDO_AUTORIZACAO:
         return (
             "📌 RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: AGUARDANDO AUTORIZAÇÃO\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
+            f"Telefone: {telefone}\n"
             f"Autorização ID: {autorizacao_id or '-'}\n"
-            f"Link autorização: {link_autorizacao or '-'}\n"
+            f"Link: {link_autorizacao or '-'}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     if status == STATUS_AGUARDANDO_VIRADA_FOLHA:
         return (
             "📆 RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: AGUARDANDO VIRADA DE FOLHA\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
-            "Observação: esse bloqueio costuma acontecer em poucos dias do mês.\n"
+            f"Telefone: {telefone}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     if elegibilidade == "sim":
         return (
             "✅ RETORNO API PRESENÇA\n\n"
-            f"Olá, {primeiro_nome} 🙂\n\n"
-            f"Lead ID: {lead_id}\n"
+            f"Cliente: {primeiro_nome}\n"
             f"Status: ELEGÍVEL\n"
-            f"Nome: {nome}\n"
             f"CPF: {cpf}\n"
-            f"Telefone: {telefone}\n\n"
-            f"💰 Valor disponível: {format_brl(valor_disponivel)}\n"
-            f"📉 Parcela estimada: {format_brl(parcela)}\n\n"
+            f"Telefone: {telefone}\n"
+            f"Valor disponível: {format_brl(valor_disponivel)}\n"
+            f"Parcela estimada: {format_brl(parcela)}\n"
             f"Motivo técnico: {mensagem_tecnica}"
         )
 
     return (
         "⚠️ RETORNO API PRESENÇA\n\n"
-        f"Olá, {primeiro_nome} 🙂\n\n"
-        f"Lead ID: {lead_id}\n"
+        f"Cliente: {primeiro_nome}\n"
         f"Status: NÃO ELEGÍVEL\n"
-        f"Nome: {nome}\n"
         f"CPF: {cpf}\n"
-        f"Telefone: {telefone}\n\n"
+        f"Telefone: {telefone}\n"
         f"Motivo técnico: {mensagem_tecnica}"
     )
 
@@ -1573,13 +1641,7 @@ async def kommo_webhook(request: Request):
         )
 
         criar_nota_kommo(lead_id, texto_nota)
-
-        # grava a mensagem pronta da API no campo Interesse (field_id 994693), sem quebra de linha
-        atualizar_mensagem_api_kommo(
-            lead_id=lead_id,
-            texto=data.get("mensagem_cliente", "")
-        )
-
+        atualizar_mensagem_api_kommo(lead_id=lead_id, texto=data.get("mensagem_cliente", ""))
         mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
 
         tags = definir_tags_por_resultado(data)
