@@ -26,8 +26,10 @@ THROTTLE_SECONDS = float(os.getenv("THROTTLE_SECONDS", "2"))
 WAIT_AFTER_AUTO_SIGN = int(os.getenv("WAIT_AFTER_AUTO_SIGN", "20"))
 VINCULOS_RETRY_TENTATIVAS = int(os.getenv("VINCULOS_RETRY_TENTATIVAS", "6"))
 VINCULOS_RETRY_ESPERA = int(os.getenv("VINCULOS_RETRY_ESPERA", "8"))
-SIMULACAO_PRAZO_PADRAO = int(os.getenv("SIMULACAO_PRAZO_PADRAO", "12"))
+
 SIMULACAO_MULTIPLICADOR = float(os.getenv("SIMULACAO_MULTIPLICADOR", "12"))
+MARGEM_MINIMA_APROVACAO = float(os.getenv("MARGEM_MINIMA_APROVACAO", "70"))
+FALLBACK_MULTIPLICADOR_DISPONIVEL = float(os.getenv("FALLBACK_MULTIPLICADOR_DISPONIVEL", "8"))
 
 CPF_FIELD_ID = 974096
 KOMMO_MSG_FIELD_ID = int(os.getenv("KOMMO_MSG_FIELD_ID", "994693"))
@@ -41,8 +43,10 @@ STATUS_SUCESSO = "sucesso"
 STATUS_AGUARDANDO_AUTORIZACAO = "aguardando_autorizacao"
 STATUS_AGUARDANDO_VIRADA_FOLHA = "aguardando_virada_folha"
 
-_LAST_CALL_TS = 0.0
+PRAZOS_SIMULACAO = [12, 18, 24, 36]
+PRIORIDADE_PRAZO = [36, 24, 18, 12]
 
+_LAST_CALL_TS = 0.0
 
 # =========================
 # LOG
@@ -51,7 +55,6 @@ def log_step(step: str, message: str, data: Any = None) -> None:
     print(f"[{step}] {message}", flush=True)
     if data is not None:
         print(f"[{step}] DATA: {data}", flush=True)
-
 
 # =========================
 # HELPERS
@@ -64,17 +67,22 @@ def throttle() -> None:
         time.sleep(wait)
     _LAST_CALL_TS = time.time()
 
-
 def only_digits(value: Any) -> str:
     return re.sub(r"\D", "", str(value or ""))
-
 
 def normalize_cpf(value: Any) -> str:
     cpf = only_digits(value)
     return cpf if len(cpf) == 11 else ""
 
-
 def normalize_phone(value: Any) -> str:
+    """
+    Regras:
+    - remove tudo que não for número
+    - remove prefixo 55 se houver
+    - se tiver 10 dígitos: insere 9 após o DDD
+    - se tiver 11 dígitos: ok
+    - se tiver mais de 11: usa os últimos 11
+    """
     original = str(value or "")
     digits = only_digits(original)
 
@@ -107,24 +115,11 @@ def normalize_phone(value: Any) -> str:
             })
             return tail
 
-    if len(digits) >= 10:
-        ddd = digits[:2]
-        ultimos_8 = digits[-8:]
-        treated = ddd + "9" + ultimos_8
-        if len(treated) == 11:
-            log_step("PHONE", "Telefone reconstruído com DDD + 9 + últimos 8", {
-                "original": original,
-                "digits": digits,
-                "treated": treated
-            })
-            return treated
-
     log_step("PHONE", "Telefone inválido após normalização", {
         "original": original,
         "digits": digits
     })
     return ""
-
 
 def split_phone(phone: str) -> Tuple[str, str]:
     digits = only_digits(phone)
@@ -135,7 +130,6 @@ def split_phone(phone: str) -> Tuple[str, str]:
         return fixed[:2], fixed[2:]
     return "11", "999999999"
 
-
 def normalize_cnpj_like(value: Any) -> str:
     """
     No Presença, o empregador pode vir como código curto.
@@ -143,13 +137,25 @@ def normalize_cnpj_like(value: Any) -> str:
     """
     return only_digits(value)
 
-
 def safe_json(resp: requests.Response) -> Any:
     try:
         return resp.json()
     except Exception:
         return {"raw_text": resp.text[:2000]}
 
+def parse_float_br(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        s = str(value).strip()
+        s = s.replace("R$", "").replace(" ", "")
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return 0.0
 
 def auth_headers(token: str) -> Dict[str, str]:
     return {
@@ -157,11 +163,9 @@ def auth_headers(token: str) -> Dict[str, str]:
         "Content-Type": "application/json"
     }
 
-
 def first_name(nome: Optional[str]) -> str:
     texto = str(nome or "").strip()
     return texto.split(" ")[0] if texto else ""
-
 
 def find_first_url(obj: Any) -> Optional[str]:
     if isinstance(obj, dict):
@@ -177,7 +181,6 @@ def find_first_url(obj: Any) -> Optional[str]:
     elif isinstance(obj, str) and obj.startswith("http"):
         return obj
     return None
-
 
 def find_first_id(obj: Any) -> Optional[str]:
     id_keys = {"id", "autorizacaoId", "authorizationId", "termoId"}
@@ -196,10 +199,8 @@ def find_first_id(obj: Any) -> Optional[str]:
                 return found
     return None
 
-
 def body_text(body: Any) -> str:
     return str(body).lower()
-
 
 def body_has_missing_authorization(body: Any) -> bool:
     text = body_text(body)
@@ -211,21 +212,17 @@ def body_has_missing_authorization(body: Any) -> bool:
         or "necessário uma autorização válida" in text
     )
 
-
 def body_has_invalid_cpf_trabalhador(body: Any) -> bool:
     text = body_text(body)
     return "cpftrabalhador" in text and ("inválido" in text or "invalido" in text)
-
 
 def body_has_phone_already_used(body: Any) -> bool:
     text = body_text(body)
     return "telefone já utilizado" in text or "telefone ja utilizado" in text
 
-
 def body_has_cpf_not_found(body: Any) -> bool:
     text = body_text(body)
     return "cpf não encontrado na base" in text or "cpf nao encontrado na base" in text
-
 
 def body_has_virada_folha(body: Any) -> bool:
     text = body_text(body)
@@ -237,7 +234,6 @@ def body_has_virada_folha(body: Any) -> bool:
         or "virada de folha" in text
     )
 
-
 def body_has_credito_trabalhador_competencia(body: Any) -> bool:
     text = body_text(body)
     return (
@@ -247,7 +243,6 @@ def body_has_credito_trabalhador_competencia(body: Any) -> bool:
         or "credito do trabalhador" in text
     )
 
-
 def body_is_definitive_inelegible(body: Any) -> bool:
     if body_has_virada_folha(body):
         return False
@@ -256,7 +251,6 @@ def body_is_definitive_inelegible(body: Any) -> bool:
         body_has_invalid_cpf_trabalhador(body),
         body_has_credito_trabalhador_competencia(body),
     ])
-
 
 def extract_candidates_vinculos(body: Any) -> List[dict]:
     if isinstance(body, list):
@@ -271,10 +265,8 @@ def extract_candidates_vinculos(body: Any) -> List[dict]:
 
     return []
 
-
 def is_truthy(value: Any) -> bool:
     return value is True or str(value).strip().lower() in {"true", "sim", "1", "yes"}
-
 
 def vinculo_tem_dados_minimos(v: dict) -> bool:
     matricula = str(
@@ -293,7 +285,6 @@ def vinculo_tem_dados_minimos(v: dict) -> bool:
     )
 
     return bool(matricula and cnpj)
-
 
 def ordenar_vinculos_para_teste(vinculos: List[dict]) -> List[dict]:
     candidatos = []
@@ -321,49 +312,151 @@ def ordenar_vinculos_para_teste(vinculos: List[dict]) -> List[dict]:
     candidatos.sort(key=lambda x: x[0], reverse=True)
     return [item[1] for item in candidatos]
 
-
 def extract_valor_parcela(margem_resp: dict) -> float:
     for k in ["valorMargemDisponivel", "margemDisponivel", "valorParcela", "parcelaMaxima"]:
         val = margem_resp.get(k)
         if val is not None:
-            try:
-                return float(str(val).replace(",", "."))
-            except Exception:
-                pass
+            f = parse_float_br(val)
+            if f > 0:
+                return f
     return 0.0
 
+def simulacao_sem_retorno_util(simulacao: Any) -> bool:
+    if simulacao is None:
+        return True
 
-def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, float]:
-    if isinstance(simul_resp, list) and simul_resp:
-        first = simul_resp[0]
-        if isinstance(first, dict):
-            valor = first.get("valorLiberado") or first.get("valor") or first.get("valorDisponivel") or 0
-            parcela = first.get("valorParcela") or first.get("parcela") or fallback_parcela or 0
-            try:
-                return float(str(valor).replace(",", ".")), float(str(parcela).replace(",", "."))
-            except Exception:
-                return 0.0, fallback_parcela
+    if isinstance(simulacao, dict):
+        if simulacao.get("raw_text") == "":
+            return True
+        if simulacao.get("erro_simulacao"):
+            return True
+        if simulacao.get("sem_conteudo"):
+            return True
+        if not simulacao:
+            return True
+
+    if isinstance(simulacao, list) and len(simulacao) == 0:
+        return True
+
+    return False
+
+def calcular_valor_disponivel_fallback(valor_parcela: float) -> float:
+    try:
+        return round(float(valor_parcela) * FALLBACK_MULTIPLICADOR_DISPONIVEL, 2)
+    except Exception:
+        return 0.0
+
+def extrair_opcoes_simulacao(simul_resp: Any) -> List[dict]:
+    if isinstance(simul_resp, list):
+        return [x for x in simul_resp if isinstance(x, dict)]
 
     if isinstance(simul_resp, dict):
-        for key in ["data", "result", "items", "content"]:
+        for key in ["data", "result", "items", "content", "simulacoes", "opcoes", "ofertas"]:
             val = simul_resp.get(key)
-            if isinstance(val, list) and val:
-                return extract_oferta(val, fallback_parcela)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+        return [simul_resp]
 
-        valor = simul_resp.get("valorLiberado") or simul_resp.get("valor") or simul_resp.get("valorDisponivel") or 0
-        parcela = simul_resp.get("valorParcela") or simul_resp.get("parcela") or fallback_parcela or 0
+    return []
+
+def obter_prazo_opcao(opcao: dict) -> int:
+    candidatos = [
+        opcao.get("quantidadeParcelas"),
+        opcao.get("prazo"),
+        opcao.get("parcelas"),
+        opcao.get("numeroParcelas"),
+    ]
+    for c in candidatos:
         try:
-            return float(str(valor).replace(",", ".")), float(str(parcela).replace(",", "."))
+            return int(str(c).strip())
         except Exception:
-            return 0.0, fallback_parcela
+            pass
 
-    return 0.0, fallback_parcela
+    texto = str(opcao)
+    achou = re.search(r"(\d+)\s*x", texto.lower())
+    if achou:
+        try:
+            return int(achou.group(1))
+        except Exception:
+            pass
 
+    return 0
 
-def erro_simulacao_empresa_nao_elegivel(simulacao: Any) -> bool:
-    texto = str(simulacao).lower()
-    return "empresa não elegível" in texto or "empresa nao elegivel" in texto
+def obter_valor_disponivel_opcao(opcao: dict) -> float:
+    candidatos = [
+        opcao.get("valorLiberado"),
+        opcao.get("valorDisponivel"),
+        opcao.get("valor"),
+        opcao.get("totalLiberado"),
+        opcao.get("valorTotalLiberado"),
+    ]
+    for c in candidatos:
+        v = parse_float_br(c)
+        if v > 0:
+            return v
 
+    texto = str(opcao)
+    achou = re.search(r"total liberado\s*r?\$?\s*([\d\.,]+)", texto.lower())
+    if achou:
+        return parse_float_br(achou.group(1))
+
+    return 0.0
+
+def obter_parcela_opcao(opcao: dict, fallback_parcela: float) -> float:
+    candidatos = [
+        opcao.get("valorParcela"),
+        opcao.get("parcela"),
+        opcao.get("parcelaMaxima"),
+        opcao.get("valorParcelaMaxima"),
+    ]
+    for c in candidatos:
+        v = parse_float_br(c)
+        if v > 0:
+            return v
+
+    texto = str(opcao)
+    achou = re.search(r"parcela máxima\s*([\d\.,]+)", texto.lower())
+    if achou:
+        v = parse_float_br(achou.group(1))
+        if v > 0:
+            return v
+
+    return fallback_parcela
+
+def extrair_resultados_validos_da_simulacao(simul_resp: Any, fallback_parcela: float, prazo_forcado: int) -> List[Dict[str, Any]]:
+    opcoes = extrair_opcoes_simulacao(simul_resp)
+    resultados = []
+
+    for opcao in opcoes:
+        valor = obter_valor_disponivel_opcao(opcao)
+        parcela = obter_parcela_opcao(opcao, fallback_parcela)
+        prazo = obter_prazo_opcao(opcao) or prazo_forcado
+
+        if valor > 0 and parcela > 0:
+            resultados.append({
+                "prazo": prazo,
+                "valor_disponivel": valor,
+                "parcela": parcela,
+                "origem": "simulacao_real",
+                "raw": opcao
+            })
+
+    return resultados
+
+def escolher_melhor_simulacao(resultados: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not resultados:
+        return None
+
+    prioridade_map = {36: 1, 24: 2, 18: 3, 12: 4}
+
+    resultados_ordenados = sorted(
+        resultados,
+        key=lambda x: (prioridade_map.get(x["prazo"], 99), -x["valor_disponivel"])
+    )
+
+    melhor = resultados_ordenados[0]
+    log_step("SIMULACAO_ESCOLHA", "Melhor simulação escolhida", melhor)
+    return melhor
 
 def format_brl(value: Any) -> str:
     try:
@@ -373,7 +466,6 @@ def format_brl(value: Any) -> str:
         return f"R$ {s}"
     except Exception:
         return "R$ 0,00"
-
 
 def limpar_mensagem_tecnica(msg: Any) -> str:
     texto = str(msg or "").strip()
@@ -402,7 +494,6 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
 
     return texto or "-"
 
-
 def preparar_texto_para_campo_kommo(texto: str) -> str:
     if not texto:
         return ""
@@ -419,7 +510,6 @@ def preparar_texto_para_campo_kommo(texto: str) -> str:
     )
     texto = re.sub(r"\s+", " ", texto).strip()
     return texto
-
 
 def build_response(
     lead_id: Optional[str],
@@ -487,16 +577,13 @@ def build_response(
         "mensagem_tecnica": mensagem_tecnica,
     }
 
-
 def do_post(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 45)) -> requests.Response:
     throttle()
     return requests.post(url, json=payload, headers=headers, timeout=timeout)
 
-
 def do_put(url: str, payload: dict, headers: Optional[Dict[str, str]] = None, timeout: Tuple[int, int] = (10, 20)) -> requests.Response:
     throttle()
     return requests.put(url, json=payload, headers=headers, timeout=timeout)
-
 
 # =========================
 # KOMMO HELPERS
@@ -506,7 +593,6 @@ def kommo_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {KOMMO_TOKEN}",
         "Content-Type": "application/json"
     }
-
 
 def extrair_lead_id_do_webhook(payload: Any, raw_body_text: str = "") -> Optional[str]:
     try:
@@ -533,7 +619,6 @@ def extrair_lead_id_do_webhook(payload: Any, raw_body_text: str = "") -> Optiona
         pass
 
     return None
-
 
 def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
     if not KOMMO_TOKEN or not KOMMO_SUBDOMAIN:
@@ -586,7 +671,6 @@ def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
         "telefone": telefone
     }
 
-
 def criar_nota_kommo(lead_id: str, texto: str) -> None:
     if not lead_id or not texto:
         return
@@ -604,7 +688,6 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
         log_step("KOMMO_NOTA", f"Status: {resp.status_code}", resp.text[:1000])
     except Exception as e:
         log_step("KOMMO_NOTA", f"Erro ao criar nota: {str(e)}")
-
 
 def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
     if not lead_id or not texto:
@@ -633,7 +716,6 @@ def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
         log_step("KOMMO_CAMPO_MSG", "Texto salvo no campo", texto_limpo)
     except Exception as e:
         log_step("KOMMO_CAMPO_MSG", f"Erro ao atualizar mensagem da API: {str(e)}")
-
 
 def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
     if not lead_id or not nomes_tags:
@@ -676,7 +758,6 @@ def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
     except Exception as e:
         log_step("KOMMO_TAG_APLICAR", f"Erro ao aplicar tags: {str(e)}")
 
-
 def mover_lead_kommo(lead_id: str, status_id: int) -> None:
     if not lead_id or not status_id:
         return
@@ -693,7 +774,6 @@ def mover_lead_kommo(lead_id: str, status_id: int) -> None:
     except Exception as e:
         log_step("KOMMO_MOVE", f"Erro ao mover lead: {str(e)}")
 
-
 def definir_tags_por_resultado(data: Dict[str, Any]) -> List[str]:
     status = data.get("status")
     elegibilidade = data.get("elegibilidade")
@@ -708,7 +788,6 @@ def definir_tags_por_resultado(data: Dict[str, Any]) -> List[str]:
         return [TAG_ELEGIVEL]
 
     return [TAG_NAO_ELEGIVEL]
-
 
 # =========================
 # PRESENÇA API
@@ -733,7 +812,6 @@ def presenca_login_token() -> str:
         raise RuntimeError(f"token_ausente_no_login: {data}")
 
     return token
-
 
 def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> Dict[str, Any]:
     if not telefone or len(telefone) != 11:
@@ -791,7 +869,6 @@ def gerar_termo(headers: Dict[str, str], cpf: str, nome: str, telefone: str) -> 
         "detalhe_termo": body,
         "erro_telefone_reutilizado": False
     }
-
 
 def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any]:
     url = f"{BASE_URL}/consultas/termo-inss/{autorizacao_id}"
@@ -868,7 +945,6 @@ def assinar_termo(headers: Dict[str, str], autorizacao_id: str) -> Dict[str, Any
         log_step("ASSINATURA_RESULTADO", "Erro na auto assinatura", resultado)
         return resultado
 
-
 def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     url = f"{BASE_URL}/v3/operacoes/consignado-privado/consultar-vinculos"
     payload = {"cpf": cpf}
@@ -878,7 +954,6 @@ def consultar_vinculos(headers: Dict[str, str], cpf: str) -> requests.Response:
     log_step("VINCULOS", f"STATUS: {resp.status_code}", safe_json(resp))
 
     return resp
-
 
 def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int, espera: int) -> requests.Response:
     ultimo_response = None
@@ -929,7 +1004,6 @@ def tentar_vinculos_com_retry(headers: Dict[str, str], cpf: str, tentativas: int
 
     raise RuntimeError("Falha desconhecida ao consultar vínculos")
 
-
 def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: str) -> Any:
     time.sleep(2)
 
@@ -955,7 +1029,6 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
     except Exception as e:
         return {"erro_generico": True, "mensagem": str(e)}
 
-
 def simular(
     headers: Dict[str, str],
     cpf: str,
@@ -963,7 +1036,8 @@ def simular(
     nome_real: str,
     matricula: str,
     cnpj: str,
-    margem: dict
+    margem: dict,
+    prazo: int
 ) -> Any:
     url = f"{BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
@@ -973,7 +1047,8 @@ def simular(
     if valor_parcela <= 0:
         return {
             "erro_simulacao": True,
-            "mensagem": "Margem zerada ou sem parcela válida"
+            "mensagem": "Margem zerada ou sem parcela válida",
+            "prazo": prazo
         }
 
     valor_solicitado = round(max(valor_parcela, 1) * SIMULACAO_MULTIPLICADOR, 2)
@@ -1013,30 +1088,88 @@ def simular(
         },
         "proposta": {
             "valorSolicitado": valor_solicitado,
-            "quantidadeParcelas": SIMULACAO_PRAZO_PADRAO,
+            "quantidadeParcelas": prazo,
             "produtoId": 28,
             "valorParcela": valor_parcela
         },
         "documentos": []
     }
 
-    log_step("SIMULACAO_PAYLOAD_FINAL", "Payload enviado para simulação", payload)
+    log_step("SIMULACAO_PAYLOAD_FINAL", f"Payload enviado para simulação {prazo}x", payload)
 
-    resp = do_post(url, payload, headers=headers, timeout=(10, 60))
-    body = safe_json(resp)
+    try:
+        resp = do_post(url, payload, headers=headers, timeout=(10, 60))
+        body = safe_json(resp)
 
-    log_step("SIMULACAO", f"STATUS: {resp.status_code}", body)
+        log_step("SIMULACAO", f"STATUS {prazo}x: {resp.status_code}", body)
 
-    if resp.status_code == 400:
+        if resp.status_code == 204:
+            return {
+                "sem_conteudo": True,
+                "raw_text": "",
+                "prazo": prazo
+            }
+
+        if resp.status_code == 400:
+            return {
+                "erro_simulacao": True,
+                "mensagem": "Simulação recusada pelo banco",
+                "detalhe": body,
+                "prazo": prazo
+            }
+
+        resp.raise_for_status()
+        return body
+
+    except requests.exceptions.ReadTimeout:
         return {
             "erro_simulacao": True,
-            "mensagem": "Simulação recusada pelo banco",
-            "detalhe": body
+            "mensagem": "Timeout na simulação",
+            "prazo": prazo
+        }
+    except Exception as e:
+        return {
+            "erro_simulacao": True,
+            "mensagem": f"Erro na simulação: {str(e)}",
+            "prazo": prazo
         }
 
-    resp.raise_for_status()
-    return body
+def tentar_simulacoes_multiplos_prazos(
+    headers: Dict[str, str],
+    cpf: str,
+    telefone: str,
+    nome_real: str,
+    matricula: str,
+    cnpj: str,
+    margem: dict
+) -> List[Dict[str, Any]]:
+    resultados = []
+    valor_parcela = extract_valor_parcela(margem)
 
+    for prazo in PRAZOS_SIMULACAO:
+        resultado = simular(
+            headers=headers,
+            cpf=cpf,
+            telefone=telefone,
+            nome_real=nome_real,
+            matricula=matricula,
+            cnpj=cnpj,
+            margem=margem,
+            prazo=prazo
+        )
+
+        if simulacao_sem_retorno_util(resultado):
+            log_step("SIMULACAO_MULTIPLA", f"Prazo {prazo}x sem retorno útil", resultado)
+            continue
+
+        extraidos = extrair_resultados_validos_da_simulacao(resultado, valor_parcela, prazo)
+        if extraidos:
+            resultados.extend(extraidos)
+        else:
+            log_step("SIMULACAO_MULTIPLA", f"Prazo {prazo}x sem oferta válida extraída", resultado)
+
+    log_step("SIMULACAO_MULTIPLA", "Resultados válidos encontrados", resultados)
+    return resultados
 
 # =========================
 # PROCESSAMENTO
@@ -1050,7 +1183,7 @@ def processar_fluxo_com_vinculos_body(
     nome: Optional[str]
 ) -> Dict[str, Any]:
     vinculos = extract_candidates_vinculos(vinculos_body)
-    log_step("PROCESSAR_VINCULOS", "Lista de vínculos recebida", vinculos)
+    log_step("ETAPA_1_VINCULOS", "Lista de vínculos recebida", vinculos)
 
     if not vinculos:
         return build_response(
@@ -1062,12 +1195,12 @@ def processar_fluxo_com_vinculos_body(
         )
 
     vinculos_ordenados = ordenar_vinculos_para_teste(vinculos)
-    log_step("PROCESSAR_VINCULOS", "Vínculos ordenados para teste", vinculos_ordenados)
+    log_step("ETAPA_1_VINCULOS", "Vínculos ordenados para teste", vinculos_ordenados)
 
     erros_encontrados = []
 
     for idx, vinculo in enumerate(vinculos_ordenados, start=1):
-        log_step("PROCESSAR_VINCULOS", f"Testando vínculo {idx}", vinculo)
+        log_step("ETAPA_2_TESTE_VINCULO", f"Testando vínculo {idx}", vinculo)
 
         matricula = str(
             vinculo.get("matricula")
@@ -1087,19 +1220,17 @@ def processar_fluxo_com_vinculos_body(
         if not matricula or not cnpj:
             erros_encontrados.append({
                 "tipo": "vinculo_incompleto",
-                "matricula": matricula,
-                "cnpj": cnpj,
                 "vinculo": vinculo
             })
             continue
 
-        log_step("PROCESSAR_VINCULOS", "Usando matrícula/cnpj", {
+        log_step("ETAPA_2_TESTE_VINCULO", "Matrícula e empregador válidos", {
             "matricula": matricula,
             "cnpj": cnpj
         })
 
         margem = consultar_margem(headers, cpf, matricula, cnpj)
-        log_step("PROCESSAR_VINCULOS", "Retorno margem", margem)
+        log_step("ETAPA_3_MARGEM", "Retorno da margem", margem)
 
         if isinstance(margem, dict) and margem.get("erro_rate_limit"):
             return build_response(
@@ -1119,79 +1250,71 @@ def processar_fluxo_com_vinculos_body(
             continue
 
         valor_parcela = extract_valor_parcela(margem)
-        if valor_parcela <= 0:
+
+        if valor_parcela < MARGEM_MINIMA_APROVACAO:
             erros_encontrados.append({
-                "tipo": "margem_zerada",
-                "detalhe": margem,
+                "tipo": "margem_abaixo_minima",
+                "valor_parcela": valor_parcela,
                 "vinculo": vinculo
             })
             continue
 
-        simulacao = simular(headers, cpf, telefone, nome or "CLIENTE", matricula, cnpj, margem)
-        log_step("PROCESSAR_VINCULOS", "Retorno simulação", simulacao)
+        log_step("ETAPA_3_MARGEM", "Margem suficiente para retorno comercial", {
+            "valor_parcela": valor_parcela,
+            "minimo_configurado": MARGEM_MINIMA_APROVACAO
+        })
 
-        if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
-            if erro_simulacao_empresa_nao_elegivel(simulacao):
-                erros_encontrados.append({
-                    "tipo": "empresa_nao_elegivel_neste_vinculo",
-                    "detalhe": simulacao,
-                    "vinculo": vinculo
-                })
-                continue
+        resultados_simulacao = tentar_simulacoes_multiplos_prazos(
+            headers=headers,
+            cpf=cpf,
+            telefone=telefone,
+            nome_real=nome or "CLIENTE",
+            matricula=matricula,
+            cnpj=cnpj,
+            margem=margem
+        )
 
-            erros_encontrados.append({
-                "tipo": "erro_simulacao",
-                "detalhe": simulacao,
-                "vinculo": vinculo
-            })
-            continue
+        melhor = escolher_melhor_simulacao(resultados_simulacao)
 
-        valor_disponivel, parcela = extract_oferta(simulacao, valor_parcela)
-
-        if valor_disponivel > 0 and parcela > 0:
-            log_step("PROCESSAR_VINCULOS", "Vínculo aprovado com sucesso", {
-                "valor_disponivel": valor_disponivel,
-                "parcela": parcela,
-                "vinculo": vinculo
-            })
-
+        if melhor:
             return build_response(
                 lead_id=lead_id,
                 status=STATUS_SUCESSO,
                 elegibilidade="sim",
-                valor_disponivel=valor_disponivel,
-                parcela=parcela,
-                mensagem_tecnica="Consulta concluída com sucesso",
+                valor_disponivel=melhor["valor_disponivel"],
+                parcela=melhor["parcela"],
+                mensagem_tecnica=f"Consulta concluída com opção {melhor['prazo']}x",
                 nome=nome
             )
 
-        erros_encontrados.append({
-            "tipo": "oferta_invalida",
-            "valor_disponivel": valor_disponivel,
-            "parcela": parcela,
-            "vinculo": vinculo
+        # vínculo ok + empregador ok + margem >= 70
+        # mesmo sem oferta final, não derruba como inelegível
+        valor_disponivel_fallback = calcular_valor_disponivel_fallback(valor_parcela)
+
+        log_step("ETAPA_5_RESULTADO", "Sem oferta retornada, usando fallback por margem válida", {
+            "valor_disponivel_fallback": valor_disponivel_fallback,
+            "parcela": valor_parcela
         })
 
-    log_step("PROCESSAR_VINCULOS", "Nenhum vínculo aprovou", erros_encontrados)
+        return build_response(
+            lead_id=lead_id,
+            status=STATUS_SUCESSO,
+            elegibilidade="sim",
+            valor_disponivel=valor_disponivel_fallback,
+            parcela=valor_parcela,
+            mensagem_tecnica="Retorno por fallback: vínculo e margem válidos",
+            nome=nome
+        )
 
-    houve_empresa_nao_elegivel = any(e.get("tipo") == "empresa_nao_elegivel_neste_vinculo" for e in erros_encontrados)
-    houve_margem_zerada = any(e.get("tipo") == "margem_zerada" for e in erros_encontrados)
-
-    mensagem_final = "Nenhum vínculo retornou oferta válida"
-
-    if houve_empresa_nao_elegivel and len(erros_encontrados) == len(vinculos_ordenados):
-        mensagem_final = "Todos os vínculos testados retornaram empresa não elegível"
-    elif houve_margem_zerada:
-        mensagem_final = "Todos os vínculos testados retornaram margem zerada ou inválida"
+    log_step("ETAPA_FINAL", "Nenhum vínculo passou nas regras mínimas", erros_encontrados)
 
     return build_response(
         lead_id=lead_id,
         status=STATUS_SUCESSO,
         elegibilidade="nao",
-        mensagem_tecnica=mensagem_final,
+        mensagem_tecnica="Nenhum vínculo com margem mínima de R$ 70,00",
         nome=nome
     )
-
 
 # =========================
 # FLUXO COMPLETO
@@ -1469,7 +1592,6 @@ def tentar_fluxo_completo(
         nome=nome
     )
 
-
 # =========================
 # FORMATAR NOTA KOMMO
 # =========================
@@ -1527,14 +1649,12 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
         f"Motivo técnico: {mensagem_tecnica}"
     )
 
-
 # =========================
 # ROTAS
 # =========================
 @app.get("/")
 def home():
     return {"status": "api rodando"}
-
 
 @app.get("/consulta")
 def consulta(
@@ -1582,7 +1702,6 @@ def consulta(
                 nome=nome
             )
         )
-
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
