@@ -137,12 +137,11 @@ def split_phone(phone: str) -> Tuple[str, str]:
 
 
 def normalize_cnpj_like(value: Any) -> str:
-    digits = only_digits(value)
-    if not digits:
-        return ""
-    if len(digits) >= 14:
-        return digits[-14:]
-    return digits.zfill(14)
+    """
+    No Presença, o empregador pode vir como código curto.
+    Não completar com zeros à esquerda.
+    """
+    return only_digits(value)
 
 
 def safe_json(resp: requests.Response) -> Any:
@@ -398,6 +397,9 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
     if "autorização ainda não refletiu" in texto_lower or "autorizacao ainda não refletiu" in texto_lower:
         return "Autorização ainda em processamento"
 
+    if "empresa não elegível" in texto_lower or "empresa nao elegivel" in texto_lower:
+        return "Empresa não elegível no vínculo testado"
+
     return texto or "-"
 
 
@@ -415,7 +417,6 @@ def preparar_texto_para_campo_kommo(texto: str) -> str:
         .replace("\u200b", "")
         .replace("\ufeff", "")
     )
-
     texto = re.sub(r"\s+", " ", texto).strip()
     return texto
 
@@ -955,7 +956,15 @@ def consultar_margem(headers: Dict[str, str], cpf: str, matricula: str, cnpj: st
         return {"erro_generico": True, "mensagem": str(e)}
 
 
-def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cnpj: str, margem: dict) -> Any:
+def simular(
+    headers: Dict[str, str],
+    cpf: str,
+    telefone: str,
+    nome_real: str,
+    matricula: str,
+    cnpj: str,
+    margem: dict
+) -> Any:
     url = f"{BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
     ddd, numero = split_phone(telefone)
@@ -976,7 +985,7 @@ def simular(headers: Dict[str, str], cpf: str, telefone: str, matricula: str, cn
                 "numero": numero
             },
             "cpf": cpf,
-            "nome": margem.get("nome") or "CLIENTE",
+            "nome": nome_real or "CLIENTE",
             "dataNascimento": margem.get("dataNascimento") or "1982-10-05",
             "nomeMae": margem.get("nomeMae") or "NAO INFORMADO",
             "email": "email@teste.com",
@@ -1118,7 +1127,7 @@ def processar_fluxo_com_vinculos_body(
             })
             continue
 
-        simulacao = simular(headers, cpf, telefone, matricula, cnpj, margem)
+        simulacao = simular(headers, cpf, telefone, nome or "CLIENTE", matricula, cnpj, margem)
         log_step("PROCESSAR_VINCULOS", "Retorno simulação", simulacao)
 
         if isinstance(simulacao, dict) and simulacao.get("erro_simulacao"):
