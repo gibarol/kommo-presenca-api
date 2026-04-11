@@ -751,8 +751,8 @@ def build_response(
 
     if elegibilidade == "sim":
         mensagem_cliente_campo = preparar_texto_para_campo_kommo(
-    f"Conseguimos aqui uma oferta para você de até {format_brl(valor_disponivel or 0)}, "
-    f"com parcela estimada de {format_brl(parcela or 0)}. "
+    f"Conseguimos aqui uma oferta para você de até *{format_brl(valor_disponivel or 0)}*, "
+    f"com parcela estimada de *{format_brl(parcela or 0)}*. "
     f"Você tem interesse em saber um pouco mais sobre essa oferta?"
 )
 
