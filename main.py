@@ -78,7 +78,7 @@ SIM_EMAIL = os.getenv("SIM_EMAIL", "cliente@teste.com")
 # TRAVA ANTI-LOOP
 RECENT_LEAD_LOCKS: Dict[str, float] = {}
 LOCK_SECONDS = int(os.getenv("LOCK_SECONDS", "180"))
-WAIT_BEFORE_MOVE_WITH_MESSAGE = int(os.getenv("WAIT_BEFORE_MOVE_WITH_MESSAGE", "4"))
+WAIT_BEFORE_MOVE_WITH_MESSAGE = int(os.getenv("WAIT_BEFORE_MOVE_WITH_MESSAGE", "5"))
 
 
 _LAST_CALL_TS = 0.0
