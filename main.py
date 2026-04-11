@@ -78,6 +78,7 @@ SIM_EMAIL = os.getenv("SIM_EMAIL", "cliente@teste.com")
 # TRAVA ANTI-LOOP
 RECENT_LEAD_LOCKS: Dict[str, float] = {}
 LOCK_SECONDS = int(os.getenv("LOCK_SECONDS", "180"))
+WAIT_BEFORE_MOVE_WITH_MESSAGE = int(os.getenv("WAIT_BEFORE_MOVE_WITH_MESSAGE", "4"))
 
 
 _LAST_CALL_TS = 0.0
@@ -694,7 +695,6 @@ def preparar_texto_para_campo_kommo(texto: str) -> str:
         .replace("\u200b", "")
         .replace("\ufeff", "")
     )
-    texto = texto.encode("ascii", "ignore").decode("ascii")
     texto = re.sub(r"\s+", " ", texto).strip()
     return texto
 
@@ -2074,10 +2074,19 @@ async def kommo_webhook(request: Request):
 
 
         if data.get("elegibilidade") == "sim":
+            texto_cliente = preparar_texto_para_campo_kommo(
+                data.get("mensagem_cliente") or "Temos um valor aqui para você. Só um instante que já vamos lhe atender."
+            )
             atualizar_mensagem_api_kommo(
                 lead_id=lead_id,
-                texto="Temos um valor aqui para você. Só um instante que já vamos lhe atender."
+                texto=texto_cliente
             )
+            log_step("KOMMO_WEBHOOK", "Mensagem de oferta salva, aguardando antes de mover etapa", {
+                "lead_id": lead_id,
+                "espera_segundos": WAIT_BEFORE_MOVE_WITH_MESSAGE,
+                "texto_cliente": texto_cliente
+            })
+            time.sleep(WAIT_BEFORE_MOVE_WITH_MESSAGE)
             if status_id_atual != str(KOMMO_STATUS_COM_OFERTA):
                 mover_lead_kommo(lead_id, KOMMO_STATUS_COM_OFERTA)
             aplicar_tags_kommo(lead_id, [TAG_ELEGIVEL])
