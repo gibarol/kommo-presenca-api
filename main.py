@@ -20,7 +20,7 @@ PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "")
 KOMMO_SUBDOMAIN = os.getenv("KOMMO_SUBDOMAIN", "")
 
-# NOVAS ETAPAS
+# ETAPAS
 KOMMO_STATUS_COM_OFERTA = int(os.getenv("KOMMO_STATUS_COM_OFERTA", "104339388"))
 KOMMO_STATUS_SEM_OFERTA = int(os.getenv("KOMMO_STATUS_SEM_OFERTA", "104339392"))
 
@@ -47,7 +47,7 @@ STATUS_SUCESSO = "sucesso"
 STATUS_AGUARDANDO_AUTORIZACAO = "aguardando_autorizacao"
 STATUS_AGUARDANDO_VIRADA_FOLHA = "aguardando_virada_folha"
 
-# dados genéricos para enriquecer a simulação
+# DADOS GENÉRICOS PARA SIMULAÇÃO
 SIM_BANK_CODE = os.getenv("SIM_BANK_CODE", "237")
 SIM_AGENCY = os.getenv("SIM_AGENCY", "0001")
 SIM_ACCOUNT = os.getenv("SIM_ACCOUNT", "123456")
@@ -60,9 +60,9 @@ SIM_COMPLEMENTO = os.getenv("SIM_COMPLEMENTO", "")
 SIM_CIDADE = os.getenv("SIM_CIDADE", "SAO PAULO")
 SIM_ESTADO = os.getenv("SIM_ESTADO", "SP")
 SIM_BAIRRO = os.getenv("SIM_BAIRRO", "CENTRO")
-SIM_EMAIL = os.getenv("SIM_EMAIL", "clienteateste.com")
+SIM_EMAIL = os.getenv("SIM_EMAIL", "cliente@teste.com")
 
-# trava anti-loop
+# TRAVA ANTI-LOOP
 RECENT_LEAD_LOCKS: Dict[str, float] = {}
 LOCK_SECONDS = int(os.getenv("LOCK_SECONDS", "180"))
 
@@ -79,7 +79,7 @@ def log_step(step: str, message: str, data: Any = None) -> None:
 
 
 # =========================
-# HELPERS GERAIS
+# HELPERS
 # =========================
 def throttle() -> None:
     global _LAST_CALL_TS
@@ -300,6 +300,10 @@ def is_truthy(value: Any) -> bool:
     return value is True or str(value).strip().lower() in {"true", "sim", "1", "yes"}
 
 
+def vinculo_elegivel_no_banco(v: dict) -> bool:
+    return is_truthy(v.get("elegivel"))
+
+
 def vinculo_tem_dados_minimos(v: dict) -> bool:
     matricula = str(
         v.get("matricula")
@@ -369,6 +373,29 @@ def simulacao_sem_retorno_util(simulacao: Any) -> bool:
         return True
 
     return False
+
+
+def simulacao_tem_erro_de_negocio(simulacao: Any) -> bool:
+    texto = body_text(simulacao)
+
+    termos = [
+        "empresa não elegível",
+        "empresa nao elegivel",
+        "tempo de cargo inferior",
+        "email no formato inválido",
+        "email no formato invalido",
+        "idade inferior",
+        "idade superior",
+        "produto não permitido",
+        "produto nao permitido",
+        "política de crédito",
+        "politica de credito",
+        "regra de produto",
+        "nao elegivel",
+        "não elegível",
+    ]
+
+    return any(t in texto for t in termos)
 
 
 def calcular_valor_disponivel_fallback(valor_parcela: float) -> float:
@@ -521,7 +548,11 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
     if "autorização ainda não refletiu" in texto_lower or "autorizacao ainda não refletiu" in texto_lower:
         return "Autorização ainda em processamento"
     if "empresa não elegível" in texto_lower or "empresa nao elegivel" in texto_lower:
-        return "Empresa não elegível no vínculo testado"
+        return "Empresa não elegível"
+    if "tempo de cargo inferior" in texto_lower:
+        return "Tempo de cargo inferior ao permitido"
+    if "email no formato inválido" in texto_lower or "email no formato invalido" in texto_lower:
+        return "Email no formato inválido"
 
     return texto or "-"
 
@@ -572,7 +603,6 @@ def build_response(
     mensagem_tecnica: Optional[str] = None,
     nome: Optional[str] = None
 ) -> Dict[str, Any]:
-    # Agora o cliente NÃO recebe valor.
     mensagem_cliente_campo = ""
 
     if elegibilidade == "sim":
@@ -784,7 +814,6 @@ def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
                 if nome_tag:
                     tags_existentes.append(nome_tag)
 
-        # preserva outras tags, mas remove só as tags controladas por esse fluxo
         tags_filtradas = [tag for tag in tags_existentes if tag not in managed_tags]
 
         for nome_tag in nomes_tags:
@@ -835,12 +864,6 @@ def definir_tags_por_resultado(data: Dict[str, Any]) -> List[str]:
     if elegibilidade == "sim":
         return [TAG_ELEGIVEL]
     return [TAG_NAO_ELEGIVEL]
-
-
-def definir_etapa_por_resultado(data: Dict[str, Any]) -> int:
-    if data.get("elegibilidade") == "sim":
-        return KOMMO_STATUS_COM_OFERTA
-    return KOMMO_STATUS_SEM_OFERTA
 
 
 # =========================
@@ -1155,8 +1178,9 @@ def tentar_simulacoes_multiplos_prazos(
     matricula: str,
     cnpj: str,
     margem: dict
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     resultados = []
+    erros_negocio = []
     valor_parcela = extract_valor_parcela(margem)
 
     for prazo in PRAZOS_SIMULACAO:
@@ -1171,6 +1195,14 @@ def tentar_simulacoes_multiplos_prazos(
             prazo=prazo
         )
 
+        if simulacao_tem_erro_de_negocio(resultado):
+            erros_negocio.append({
+                "prazo": prazo,
+                "detalhe": resultado
+            })
+            log_step("SIMULACAO_MULTIPLA", f"Prazo {prazo}x com erro de negócio", resultado)
+            continue
+
         if simulacao_sem_retorno_util(resultado):
             log_step("SIMULACAO_MULTIPLA", f"Prazo {prazo}x sem retorno útil", resultado)
             continue
@@ -1182,7 +1214,12 @@ def tentar_simulacoes_multiplos_prazos(
             log_step("SIMULACAO_MULTIPLA", f"Prazo {prazo}x sem oferta válida extraída", resultado)
 
     log_step("SIMULACAO_MULTIPLA", "Resultados válidos encontrados", resultados)
-    return resultados
+    log_step("SIMULACAO_MULTIPLA", "Erros de negócio encontrados", erros_negocio)
+
+    return {
+        "resultados": resultados,
+        "erros_negocio": erros_negocio
+    }
 
 
 # =========================
@@ -1208,8 +1245,20 @@ def processar_fluxo_com_vinculos_body(
             nome=nome
         )
 
-    vinculos_ordenados = ordenar_vinculos_para_teste(vinculos)
-    log_step("ETAPA_1_VINCULOS", "Vínculos ordenados para teste", vinculos_ordenados)
+    vinculos_elegiveis = [v for v in vinculos if vinculo_elegivel_no_banco(v)]
+    log_step("ETAPA_1_VINCULOS", "Vínculos elegíveis filtrados", vinculos_elegiveis)
+
+    if not vinculos_elegiveis:
+        return build_response(
+            lead_id=lead_id,
+            status=STATUS_SUCESSO,
+            elegibilidade="nao",
+            mensagem_tecnica="Todos os vínculos retornaram inelegíveis no banco",
+            nome=nome
+        )
+
+    vinculos_ordenados = ordenar_vinculos_para_teste(vinculos_elegiveis)
+    log_step("ETAPA_1_VINCULOS", "Vínculos elegíveis ordenados para teste", vinculos_ordenados)
 
     erros_encontrados = []
 
@@ -1281,7 +1330,10 @@ def processar_fluxo_com_vinculos_body(
             margem=margem
         )
 
-        melhor = escolher_melhor_simulacao(resultados_simulacao)
+        resultados_validos = resultados_simulacao.get("resultados", [])
+        erros_negocio = resultados_simulacao.get("erros_negocio", [])
+
+        melhor = escolher_melhor_simulacao(resultados_validos)
 
         if melhor:
             return build_response(
@@ -1291,6 +1343,15 @@ def processar_fluxo_com_vinculos_body(
                 valor_disponivel=melhor["valor_disponivel"],
                 parcela=melhor["parcela"],
                 mensagem_tecnica=f"Consulta concluída com opção {melhor['prazo']}x",
+                nome=nome
+            )
+
+        if erros_negocio:
+            return build_response(
+                lead_id=lead_id,
+                status=STATUS_SUCESSO,
+                elegibilidade="nao",
+                mensagem_tecnica=f"Simulação recusada por regra do banco: {erros_negocio[0]['detalhe']}",
                 nome=nome
             )
 
@@ -1306,7 +1367,7 @@ def processar_fluxo_com_vinculos_body(
             elegibilidade="sim",
             valor_disponivel=valor_disponivel_fallback,
             parcela=valor_parcela,
-            mensagem_tecnica="Retorno por fallback: vínculo e margem válidos",
+            mensagem_tecnica="Retorno por fallback: vínculo elegível e margem válida, sem oferta explícita",
             nome=nome
         )
 
@@ -1316,7 +1377,7 @@ def processar_fluxo_com_vinculos_body(
         lead_id=lead_id,
         status=STATUS_SUCESSO,
         elegibilidade="nao",
-        mensagem_tecnica="Nenhum vínculo com margem mínima de R$ 70,00",
+        mensagem_tecnica="Nenhum vínculo elegível com margem mínima de R$ 70,00",
         nome=nome
     )
 
@@ -1630,7 +1691,6 @@ async def kommo_webhook(request: Request):
 
         status_id_atual = str(dados_lead.get("status_id", "") or "")
 
-        # Se já estiver em uma das etapas finais, ignora para não ficar consultando sozinho
         if status_id_atual in {str(KOMMO_STATUS_COM_OFERTA), str(KOMMO_STATUS_SEM_OFERTA)}:
             log_step("KOMMO_WEBHOOK", f"Lead {lead_id} já está em etapa final, ignorando")
             return {"status": "ok", "mensagem": "lead_ja_em_etapa_final"}
@@ -1671,7 +1731,6 @@ async def kommo_webhook(request: Request):
         )
         criar_nota_kommo(lead_id, texto_nota)
 
-        # COM OFERTA -> grava mensagem curta e move para etapa com oferta
         if data.get("elegibilidade") == "sim":
             atualizar_mensagem_api_kommo(
                 lead_id=lead_id,
@@ -1681,7 +1740,6 @@ async def kommo_webhook(request: Request):
                 mover_lead_kommo(lead_id, KOMMO_STATUS_COM_OFERTA)
             aplicar_tags_kommo(lead_id, [TAG_ELEGIVEL])
 
-        # SEM OFERTA -> não fala com cliente, limpa campo e move para etapa sem oferta
         else:
             limpar_campo_mensagem_api_kommo(lead_id)
             if status_id_atual != str(KOMMO_STATUS_SEM_OFERTA):
