@@ -19,7 +19,10 @@ PRESENCA_SENHA = os.getenv("PRESENCA_SENHA", "")
 
 KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "")
 KOMMO_SUBDOMAIN = os.getenv("KOMMO_SUBDOMAIN", "")
-KOMMO_TARGET_STATUS_ID = int(os.getenv("KOMMO_TARGET_STATUS_ID", "103281440"))
+
+# NOVAS ETAPAS
+KOMMO_STATUS_COM_OFERTA = int(os.getenv("KOMMO_STATUS_COM_OFERTA", "104339388"))
+KOMMO_STATUS_SEM_OFERTA = int(os.getenv("KOMMO_STATUS_SEM_OFERTA", "104339392"))
 
 CPF_FIELD_ID = int(os.getenv("CPF_FIELD_ID", "974096"))
 KOMMO_MSG_FIELD_ID = int(os.getenv("KOMMO_MSG_FIELD_ID", "994693"))
@@ -34,7 +37,6 @@ MARGEM_MINIMA_APROVACAO = float(os.getenv("MARGEM_MINIMA_APROVACAO", "70"))
 FALLBACK_MULTIPLICADOR_DISPONIVEL = float(os.getenv("FALLBACK_MULTIPLICADOR_DISPONIVEL", "8"))
 
 PRAZOS_SIMULACAO = [12, 18, 24, 36]
-PRIORIDADE_PRAZO = [36, 24, 18, 12]
 
 TAG_ELEGIVEL = os.getenv("KOMMO_TAG_ELEGIVEL", "Elegível CLT")
 TAG_NAO_ELEGIVEL = os.getenv("KOMMO_TAG_NAO_ELEGIVEL", "Não Elegível CLT")
@@ -58,7 +60,11 @@ SIM_COMPLEMENTO = os.getenv("SIM_COMPLEMENTO", "")
 SIM_CIDADE = os.getenv("SIM_CIDADE", "SAO PAULO")
 SIM_ESTADO = os.getenv("SIM_ESTADO", "SP")
 SIM_BAIRRO = os.getenv("SIM_BAIRRO", "CENTRO")
-SIM_EMAIL = os.getenv("SIM_EMAIL", "cliente@teste.com")
+SIM_EMAIL = os.getenv("SIM_EMAIL", "clienteateste.com")
+
+# trava anti-loop
+RECENT_LEAD_LOCKS: Dict[str, float] = {}
+LOCK_SECONDS = int(os.getenv("LOCK_SECONDS", "180"))
 
 _LAST_CALL_TS = 0.0
 
@@ -73,7 +79,7 @@ def log_step(step: str, message: str, data: Any = None) -> None:
 
 
 # =========================
-# HELPERS
+# HELPERS GERAIS
 # =========================
 def throttle() -> None:
     global _LAST_CALL_TS
@@ -318,19 +324,14 @@ def ordenar_vinculos_para_teste(vinculos: List[dict]) -> List[dict]:
 
     for v in vinculos:
         score = 0
-
         if is_truthy(v.get("elegivel")):
             score += 100
-
         if is_truthy(v.get("empresaElegivel")):
             score += 50
-
         if is_truthy(v.get("possuiMargem")):
             score += 30
-
         if is_truthy(v.get("ativo")):
             score += 20
-
         if vinculo_tem_dados_minimos(v):
             score += 10
 
@@ -521,13 +522,13 @@ def limpar_mensagem_tecnica(msg: Any) -> str:
         return "Autorização ainda em processamento"
     if "empresa não elegível" in texto_lower or "empresa nao elegivel" in texto_lower:
         return "Empresa não elegível no vínculo testado"
+
     return texto or "-"
 
 
 def preparar_texto_para_campo_kommo(texto: str) -> str:
     if not texto:
         return ""
-
     texto = str(texto)
     texto = (
         texto.replace("\r\n", " ")
@@ -538,10 +539,26 @@ def preparar_texto_para_campo_kommo(texto: str) -> str:
         .replace("\u200b", "")
         .replace("\ufeff", "")
     )
-
     texto = texto.encode("ascii", "ignore").decode("ascii")
     texto = re.sub(r"\s+", " ", texto).strip()
     return texto
+
+
+def lead_esta_travado(lead_id: str) -> bool:
+    agora = time.time()
+    expira_em = RECENT_LEAD_LOCKS.get(str(lead_id), 0)
+    return expira_em > agora
+
+
+def travar_lead(lead_id: str) -> None:
+    RECENT_LEAD_LOCKS[str(lead_id)] = time.time() + LOCK_SECONDS
+
+
+def limpar_travas_expiradas() -> None:
+    agora = time.time()
+    expirados = [k for k, v in RECENT_LEAD_LOCKS.items() if v <= agora]
+    for k in expirados:
+        RECENT_LEAD_LOCKS.pop(k, None)
 
 
 def build_response(
@@ -555,44 +572,13 @@ def build_response(
     mensagem_tecnica: Optional[str] = None,
     nome: Optional[str] = None
 ) -> Dict[str, Any]:
-    primeiro_nome = first_name(nome)
-    saudacao_nome = f"{primeiro_nome}, " if primeiro_nome else ""
+    # Agora o cliente NÃO recebe valor.
+    mensagem_cliente_campo = ""
 
-    mensagem_bonita = ""
-    tipo_mensagem = ""
-
-    if status == STATUS_AGUARDANDO_AUTORIZACAO:
-        tipo_mensagem = "aguardando_autorizacao"
-        mensagem_bonita = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂 "
-            f"Para continuar sua consulta, preciso que você conclua esta autorização rápida: {link_autorizacao or ''} "
-            "Assim que finalizar, me avise por aqui para eu seguir com a análise."
+    if elegibilidade == "sim":
+        mensagem_cliente_campo = preparar_texto_para_campo_kommo(
+            "Temos um valor aqui para você. Só um instante que já vamos lhe atender."
         )
-    elif status == STATUS_AGUARDANDO_VIRADA_FOLHA:
-        tipo_mensagem = "aguardando_virada_folha"
-        mensagem_bonita = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂 "
-            "Sua consulta está em período de virada de folha. "
-            "Esse é um bloqueio temporário que costuma acontecer em poucos dias do mês. "
-            "Assim que a base normalizar, posso consultar novamente para você."
-        )
-    elif elegibilidade == "sim":
-        tipo_mensagem = "elegivel"
-        mensagem_bonita = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂 "
-            f"Temos uma boa notícia: você tem aproximadamente {format_brl(valor_disponivel)} disponível, "
-            f"com parcela estimada de {format_brl(parcela)}. "
-            "Se quiser, sigo com os próximos passos para você."
-        )
-    elif elegibilidade == "nao":
-        tipo_mensagem = "nao_elegivel"
-        mensagem_bonita = (
-            f"Olá, {saudacao_nome}tudo bem? 🙂 "
-            "No momento não encontramos uma condição disponível para essa consulta. "
-            "Se quiser, posso verificar novamente mais tarde ou analisar outra possibilidade."
-        )
-
-    mensagem_campo = preparar_texto_para_campo_kommo(mensagem_bonita)
 
     return {
         "lead_id": lead_id,
@@ -602,9 +588,8 @@ def build_response(
         "parcela": parcela,
         "autorizacao_id": autorizacao_id,
         "link_autorizacao": link_autorizacao,
-        "mensagem_cliente": mensagem_bonita,
-        "mensagem_cliente_campo": mensagem_campo,
-        "tipo_mensagem": tipo_mensagem,
+        "mensagem_cliente": mensagem_cliente_campo,
+        "tipo_mensagem": "elegivel" if elegibilidade == "sim" else "sem_envio",
         "mensagem_tecnica": mensagem_tecnica,
     }
 
@@ -672,6 +657,7 @@ def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
 
     lead_data = safe_json(lead_resp)
     nome = lead_data.get("name", "")
+    status_id = str(lead_data.get("status_id", "") or "")
 
     cpf = ""
     for field in lead_data.get("custom_fields_values", []) or []:
@@ -701,7 +687,12 @@ def buscar_lead_kommo(lead_id: str) -> Optional[Dict[str, str]]:
                             telefone = str(values[0].get("value", "") or "")
                             break
 
-    return {"cpf": cpf, "nome": nome, "telefone": telefone}
+    return {
+        "cpf": cpf,
+        "nome": nome,
+        "telefone": telefone,
+        "status_id": status_id
+    }
 
 
 def criar_nota_kommo(lead_id: str, texto: str) -> None:
@@ -722,7 +713,7 @@ def criar_nota_kommo(lead_id: str, texto: str) -> None:
 
 
 def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
-    if not lead_id or not texto:
+    if not lead_id:
         return
 
     texto_limpo = preparar_texto_para_campo_kommo(texto)
@@ -746,9 +737,38 @@ def atualizar_mensagem_api_kommo(lead_id: str, texto: str) -> None:
         log_step("KOMMO_CAMPO_MSG", f"Erro ao atualizar mensagem da API: {str(e)}")
 
 
+def limpar_campo_mensagem_api_kommo(lead_id: str) -> None:
+    if not lead_id:
+        return
+
+    url = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+    body = [{
+        "id": int(lead_id),
+        "custom_fields_values": [
+            {
+                "field_id": KOMMO_MSG_FIELD_ID,
+                "values": [{"value": ""}]
+            }
+        ]
+    }]
+
+    try:
+        resp = requests.patch(url, headers=kommo_headers(), json=body, timeout=30)
+        log_step("KOMMO_CAMPO_MSG", f"Campo limpado status: {resp.status_code}", resp.text[:1000])
+    except Exception as e:
+        log_step("KOMMO_CAMPO_MSG", f"Erro ao limpar campo mensagem: {str(e)}")
+
+
 def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
     if not lead_id or not nomes_tags:
         return
+
+    managed_tags = {
+        TAG_ELEGIVEL,
+        TAG_NAO_ELEGIVEL,
+        TAG_AGUARDANDO_AUTORIZACAO,
+        TAG_AGUARDANDO_VIRADA,
+    }
 
     try:
         url_get = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
@@ -764,13 +784,15 @@ def aplicar_tags_kommo(lead_id: str, nomes_tags: List[str]) -> None:
                 if nome_tag:
                     tags_existentes.append(nome_tag)
 
-        todas_tags = tags_existentes[:]
+        # preserva outras tags, mas remove só as tags controladas por esse fluxo
+        tags_filtradas = [tag for tag in tags_existentes if tag not in managed_tags]
+
         for nome_tag in nomes_tags:
             nome_tag = str(nome_tag or "").strip()
-            if nome_tag and nome_tag not in todas_tags:
-                todas_tags.append(nome_tag)
+            if nome_tag and nome_tag not in tags_filtradas:
+                tags_filtradas.append(nome_tag)
 
-        tags_payload = [{"name": tag} for tag in todas_tags]
+        tags_payload = [{"name": tag} for tag in tags_filtradas]
 
         url_patch = f"https://{KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads"
         body = [{
@@ -813,6 +835,12 @@ def definir_tags_por_resultado(data: Dict[str, Any]) -> List[str]:
     if elegibilidade == "sim":
         return [TAG_ELEGIVEL]
     return [TAG_NAO_ELEGIVEL]
+
+
+def definir_etapa_por_resultado(data: Dict[str, Any]) -> int:
+    if data.get("elegibilidade") == "sim":
+        return KOMMO_STATUS_COM_OFERTA
+    return KOMMO_STATUS_SEM_OFERTA
 
 
 # =========================
@@ -1006,10 +1034,7 @@ def montar_payload_simulacao(
 
     payload = {
         "tomador": {
-            "telefone": {
-                "ddd": ddd,
-                "numero": numero
-            },
+            "telefone": {"ddd": ddd, "numero": numero},
             "cpf": cpf,
             "nome": nome_real or "CLIENTE",
             "dataNascimento": margem.get("dataNascimento") or "1982-10-05",
@@ -1083,7 +1108,6 @@ def simular(
     if valor_parcela <= 0:
         return {"erro_simulacao": True, "mensagem": "Margem zerada ou sem parcela válida", "prazo": prazo}
 
-    # 1a tentativa normal
     payload = montar_payload_simulacao(cpf, telefone, nome_real, matricula, cnpj, margem, prazo, enrich=False)
     log_step("SIMULACAO_PAYLOAD_FINAL", f"Payload enviado para simulação {prazo}x", payload)
 
@@ -1096,7 +1120,6 @@ def simular(
             resp.raise_for_status()
             return body
 
-        # 2a tentativa enriquecida
         payload2 = montar_payload_simulacao(cpf, telefone, nome_real, matricula, cnpj, margem, prazo, enrich=True)
         log_step("SIMULACAO_PAYLOAD_FINAL", f"Retry enriquecido {prazo}x", payload2)
 
@@ -1456,7 +1479,7 @@ def tentar_fluxo_completo(
 
 
 # =========================
-# FORMATAR NOTA KOMMO
+# NOTA INTERNA
 # =========================
 def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, data: Dict[str, Any]) -> str:
     elegibilidade = data.get("elegibilidade")
@@ -1506,7 +1529,7 @@ def montar_texto_nota_kommo(lead_id: str, nome: str, cpf: str, telefone: str, da
     return (
         "⚠️ RETORNO API PRESENÇA\n\n"
         f"Cliente: {primeiro_nome}\n"
-        f"Status: NÃO ELEGÍVEL\n"
+        f"Status: SEM OFERTA\n"
         f"CPF: {cpf}\n"
         f"Telefone: {telefone}\n"
         f"Motivo técnico: {mensagem_tecnica}"
@@ -1590,12 +1613,27 @@ async def kommo_webhook(request: Request):
         if not lead_id:
             return {"status": "ok", "mensagem": "lead_id_nao_encontrado"}
 
+        limpar_travas_expiradas()
+
+        if lead_esta_travado(lead_id):
+            log_step("KOMMO_WEBHOOK", f"Lead {lead_id} ignorado por trava anti-loop")
+            return {"status": "ok", "mensagem": "lead_ignorado_por_trava"}
+
+        travar_lead(lead_id)
+
         dados_lead = buscar_lead_kommo(lead_id)
         log_step("KOMMO_WEBHOOK", "DADOS LEAD", dados_lead)
 
         if not dados_lead:
             criar_nota_kommo(lead_id, "Erro ao buscar os dados do lead no Kommo.")
             return {"status": "ok", "mensagem": "erro_busca_lead"}
+
+        status_id_atual = str(dados_lead.get("status_id", "") or "")
+
+        # Se já estiver em uma das etapas finais, ignora para não ficar consultando sozinho
+        if status_id_atual in {str(KOMMO_STATUS_COM_OFERTA), str(KOMMO_STATUS_SEM_OFERTA)}:
+            log_step("KOMMO_WEBHOOK", f"Lead {lead_id} já está em etapa final, ignorando")
+            return {"status": "ok", "mensagem": "lead_ja_em_etapa_final"}
 
         cpf = normalize_cpf(dados_lead.get("cpf"))
         nome = str(dados_lead.get("nome") or "")
@@ -1608,11 +1646,9 @@ async def kommo_webhook(request: Request):
                 lead_id,
                 "Não foi possível consultar: faltam dados obrigatórios no lead (CPF, nome ou telefone)."
             )
-            atualizar_mensagem_api_kommo(
-                lead_id=lead_id,
-                texto="Ola, tudo bem? No momento nao consegui concluir sua consulta porque faltam alguns dados. Me envie por favor seu CPF e telefone atualizados."
-            )
-            mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
+            limpar_campo_mensagem_api_kommo(lead_id)
+            if status_id_atual != str(KOMMO_STATUS_SEM_OFERTA):
+                mover_lead_kommo(lead_id, KOMMO_STATUS_SEM_OFERTA)
             aplicar_tags_kommo(lead_id, [TAG_NAO_ELEGIVEL])
             return {"status": "ok", "mensagem": "dados_incompletos"}
 
@@ -1633,11 +1669,24 @@ async def kommo_webhook(request: Request):
             telefone=telefone,
             data=data
         )
-
         criar_nota_kommo(lead_id, texto_nota)
-        atualizar_mensagem_api_kommo(lead_id=lead_id, texto=data.get("mensagem_cliente_campo", ""))
-        mover_lead_kommo(lead_id, KOMMO_TARGET_STATUS_ID)
-        aplicar_tags_kommo(lead_id, definir_tags_por_resultado(data))
+
+        # COM OFERTA -> grava mensagem curta e move para etapa com oferta
+        if data.get("elegibilidade") == "sim":
+            atualizar_mensagem_api_kommo(
+                lead_id=lead_id,
+                texto="Temos um valor aqui para você. Só um instante que já vamos lhe atender."
+            )
+            if status_id_atual != str(KOMMO_STATUS_COM_OFERTA):
+                mover_lead_kommo(lead_id, KOMMO_STATUS_COM_OFERTA)
+            aplicar_tags_kommo(lead_id, [TAG_ELEGIVEL])
+
+        # SEM OFERTA -> não fala com cliente, limpa campo e move para etapa sem oferta
+        else:
+            limpar_campo_mensagem_api_kommo(lead_id)
+            if status_id_atual != str(KOMMO_STATUS_SEM_OFERTA):
+                mover_lead_kommo(lead_id, KOMMO_STATUS_SEM_OFERTA)
+            aplicar_tags_kommo(lead_id, definir_tags_por_resultado(data))
 
         return {"status": "ok", "resultado": data}
 
