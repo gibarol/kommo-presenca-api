@@ -12,6 +12,17 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
+def format_brl(valor):
+    try:
+        return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return "R$ 0,00"
+
+def first_name(nome):
+    if not nome:
+        return ""
+    return nome.strip().split(" ")[0]
+
 
 # =========================
 # CONFIG
@@ -740,8 +751,10 @@ def build_response(
 
     if elegibilidade == "sim":
         mensagem_cliente_campo = preparar_texto_para_campo_kommo(
-            "Temos um valor aqui para você. Só um instante que já vamos lhe atender."
-        )
+    f"Conseguimos aqui uma oferta para você de até {format_brl(valor_disponivel or 0)}, "
+    f"com parcela estimada de {format_brl(parcela or 0)}. "
+    f"Você tem interesse em saber um pouco mais sobre essa oferta?"
+)
 
 
     return {
