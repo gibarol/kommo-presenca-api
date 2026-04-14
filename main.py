@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs
 
@@ -11,17 +12,6 @@ from fastapi.responses import JSONResponse
 
 
 app = FastAPI()
-
-def format_brl(valor):
-    try:
-        return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return "R$ 0,00"
-
-def first_name(nome):
-    if not nome:
-        return ""
-    return nome.strip().split(" ")[0]
 
 
 # =========================
@@ -475,31 +465,33 @@ def simulacao_sem_retorno_util(simulacao: Any) -> bool:
 
 
 
-def simulacao_tem_erro_de_negocio(simulacao: Any) -> bool:
-    texto = body_text(simulacao)
+def remover_acentos(texto: str) -> str:
+    texto = str(texto or "")
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", texto)
+        if not unicodedata.combining(c)
+    )
 
+
+def simulacao_tem_erro_de_negocio(simulacao: Any) -> bool:
+    texto = remover_acentos(body_text(simulacao)).lower()
 
     termos = [
-        "empresa não elegível",
+        "porte da empresa nao elegivel",
+        "porte empresa nao elegivel",
         "empresa nao elegivel",
         "tempo de cargo inferior",
-        "email no formato inválido",
         "email no formato invalido",
         "idade inferior",
         "idade superior",
-        "produto não permitido",
         "produto nao permitido",
-        "política de crédito",
         "politica de credito",
         "regra de produto",
+        "fora do roteiro operacional",
         "nao elegivel",
-        "não elegível",
     ]
 
-
     return any(t in texto for t in termos)
-
-
 
 
 def calcular_valor_disponivel_fallback(valor_parcela: float) -> float:
@@ -751,10 +743,8 @@ def build_response(
 
     if elegibilidade == "sim":
         mensagem_cliente_campo = preparar_texto_para_campo_kommo(
-    f"Conseguimos aqui uma oferta para você de até *{format_brl(valor_disponivel or 0)}*, "
-    f"com parcela estimada de *{format_brl(parcela or 0)}*. "
-    f"Você tem interesse em saber um pouco mais sobre essa oferta?"
-)
+            "Temos um valor aqui para você. Só um instante que já vamos lhe atender."
+        )
 
 
     return {
@@ -1638,31 +1628,34 @@ def processar_fluxo_com_vinculos_body(
 
 
         if erros_negocio:
+            primeiro_erro = erros_negocio[0].get("detalhe")
             return build_response(
                 lead_id=lead_id,
                 status=STATUS_SUCESSO,
                 elegibilidade="nao",
-                mensagem_tecnica=f"Simulação recusada por regra do banco: {erros_negocio[0]['detalhe']}",
+                mensagem_tecnica=f"Simulação recusada por regra do banco: {primeiro_erro}",
                 nome=nome
             )
 
 
-        valor_disponivel_fallback = calcular_valor_disponivel_fallback(valor_parcela)
-        log_step("ETAPA_5_RESULTADO", "Sem oferta retornada, usando fallback por margem válida", {
-            "valor_disponivel_fallback": valor_disponivel_fallback,
-            "parcela": valor_parcela
-        })
+        # Só usa fallback se realmente não houve erro de negócio do banco
+        if not resultados_validos:
+            valor_disponivel_fallback = calcular_valor_disponivel_fallback(valor_parcela)
+            log_step("ETAPA_5_RESULTADO", "Sem oferta retornada, usando fallback por margem válida", {
+                "valor_disponivel_fallback": valor_disponivel_fallback,
+                "parcela": valor_parcela
+            })
 
 
-        return build_response(
-            lead_id=lead_id,
-            status=STATUS_SUCESSO,
-            elegibilidade="sim",
-            valor_disponivel=valor_disponivel_fallback,
-            parcela=valor_parcela,
-            mensagem_tecnica="Retorno por fallback: vínculo elegível e margem válida, sem oferta explícita",
-            nome=nome
-        )
+            return build_response(
+                lead_id=lead_id,
+                status=STATUS_SUCESSO,
+                elegibilidade="sim",
+                valor_disponivel=valor_disponivel_fallback,
+                parcela=valor_parcela,
+                mensagem_tecnica="Retorno por fallback: vínculo elegível e margem válida, sem oferta explícita",
+                nome=nome
+            )
 
 
     log_step("ETAPA_FINAL", "Nenhum vínculo passou nas regras mínimas", erros_encontrados)
